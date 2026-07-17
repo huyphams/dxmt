@@ -6,7 +6,9 @@
 #include <utility>
 
 namespace dxmt {
+#ifndef DXMT_NATIVE
 Logger Logger::s_instance("dxgi.log");
+#endif
 
 VendorExtension g_extension_enabled = VendorExtension::None;
 
