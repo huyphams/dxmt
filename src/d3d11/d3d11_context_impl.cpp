@@ -4731,11 +4731,14 @@ public:
       pso->GetPipeline(&GraphicsPipeline); // may block
       enc.tess_num_output_control_point_element = GraphicsPipeline.NumControlPointOutputElement;
       enc.tess_threads_per_patch = GraphicsPipeline.ThreadsPerPatch;
-      if (!GraphicsPipeline.PipelineState)
+      if (!GraphicsPipeline.PipelineState) {
+        render_encoder->pipeline_invalid = true;
         return;
+      }
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
       cmd.type = WMTRenderCommandSetPSO;
       cmd.pso = GraphicsPipeline.PipelineState;
+      render_encoder->pipeline_invalid = false;
       render_encoder->last_pso = GraphicsPipeline.PipelineState;
     });
 
@@ -4777,11 +4780,14 @@ public:
       render_encoder->use_geometry = 1;
       MTL_COMPILED_GRAPHICS_PIPELINE GraphicsPipeline{};
       pso->GetPipeline(&GraphicsPipeline); // may block
-      if (!GraphicsPipeline.PipelineState)
+      if (!GraphicsPipeline.PipelineState) {
+        render_encoder->pipeline_invalid = true;
         return;
+      }
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
       cmd.type = WMTRenderCommandSetPSO;
       cmd.pso = GraphicsPipeline.PipelineState;
+      render_encoder->pipeline_invalid = false;
       render_encoder->last_pso = GraphicsPipeline.PipelineState;
     });
 
@@ -4833,11 +4839,14 @@ public:
     EmitST([pso = std::move(pipeline)](ArgumentEncodingContext& enc) {
       MTL_COMPILED_GRAPHICS_PIPELINE GraphicsPipeline{};
       pso->GetPipeline(&GraphicsPipeline); // may block
-      if (!GraphicsPipeline.PipelineState)
+      if (!GraphicsPipeline.PipelineState) {
+        enc.currentRenderEncoder()->pipeline_invalid = true;
         return;
+      }
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
       cmd.type = WMTRenderCommandSetPSO;
       cmd.pso = GraphicsPipeline.PipelineState;
+      enc.currentRenderEncoder()->pipeline_invalid = false;
       enc.currentRenderEncoder()->last_pso = GraphicsPipeline.PipelineState;
     });
 
