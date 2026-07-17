@@ -223,6 +223,17 @@ Texture::allocate(Flags<TextureAllocationFlag> flags, WMT::Heap heap, uint64_t h
 }
 
 Rc<TextureAllocation>
+Texture::allocateFromBuffer(
+    WMT::Reference<WMT::Buffer> &&buffer, void *mapped, Flags<TextureAllocationFlag> flags
+) {
+  assert(bytes_per_image_ && "allocateFromBuffer requires the linear-texture ctor");
+  WMTTextureInfo info = info_; // copy
+  info.mach_port = 0;
+  info.options = WMTResourceHazardTrackingModeUntracked; // StorageModeShared
+  return new TextureAllocation(this, std::move(buffer), mapped, info, bytes_per_row_, flags);
+}
+
+Rc<TextureAllocation>
 Texture::import(mach_port_t mach_port) {
   Flags<TextureAllocationFlag> flags;
   WMTTextureInfo info;

@@ -1331,3 +1331,13 @@ MTLTexture_getBytes(
   params.bytes_per_image = bytes_per_image;
   UNIX_CALL(145, &params);
 }
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newBufferMapped(obj_handle_t device, struct WMTBufferInfo *info) {
+  struct unixcall_mtldevice_newbuffer params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret = 0;
+  UNIX_CALL(146, &params);
+  return params.ret;
+}
