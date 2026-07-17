@@ -325,11 +325,15 @@ llvm::Error convert_dxbc_pixel_shader(
   bool pso_disable_depth_output = false;
   uint32_t pso_unorm_output_reg_mask = 0;
   uint32_t *pso_pixel_formats = nullptr;
+  uint32_t pso_uint_output_reg_mask = 0;
+  uint32_t pso_sint_output_reg_mask = 0;
   SM50_SHADER_PSO_PIXEL_SHADER_DATA *pso_data = nullptr;
   if (args_get_data<SM50_SHADER_PSO_PIXEL_SHADER, SM50_SHADER_PSO_PIXEL_SHADER_DATA>(pArgs, &pso_data)) {
     pso_dual_source_blending = pso_data->dual_source_blending;
     pso_disable_depth_output = pso_data->disable_depth_output;
     pso_unorm_output_reg_mask = pso_data->unorm_output_reg_mask;
+    pso_uint_output_reg_mask = pso_data->uint_output_reg_mask;
+    pso_sint_output_reg_mask = pso_data->sint_output_reg_mask;
     pso_sample_mask = pso_data->sample_mask;
     pso_pixel_formats = pso_data->pixel_formats;
   }
@@ -358,6 +362,8 @@ llvm::Error convert_dxbc_pixel_shader(
     sig_ctx.pso_sample_mask = pso_sample_mask;
     if (pso_pixel_formats)
       memcpy(sig_ctx.pixel_formats, pso_pixel_formats, sizeof(sig_ctx.pixel_formats));
+    sig_ctx.uint_output_reg_mask = pso_uint_output_reg_mask;
+    sig_ctx.sint_output_reg_mask = pso_sint_output_reg_mask;
     for (auto &p : pShaderInternal->signature_handlers) {
       p(sig_ctx);
     }
@@ -1252,6 +1258,8 @@ AIRCONV_API int SM50Initialize(
     if (sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER) {
       pRefl->PixelShader.ValidRenderTargets = sm50_shader->pso_valid_output_reg_mask;
       pRefl->PixelShader.HasCoverageOutput = sm50_shader->ps_has_coverage_output;
+      pRefl->PixelShader.UintOutputRegisterMask = sm50_shader->ps_output_declared_uint_mask;
+      pRefl->PixelShader.SintOutputRegisterMask = sm50_shader->ps_output_declared_sint_mask;
     }
     pRefl->NumOutputElement = sm50_shader->max_output_register;
     pRefl->ArgumentTableQwords = binding_table.Size();

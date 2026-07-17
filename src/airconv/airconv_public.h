@@ -97,6 +97,12 @@ struct MTL_POST_TESSELLATOR_REFLECTION {
 struct MTL_PIXEL_SHADER_REFLECTION {
   uint32_t ValidRenderTargets;
   uint32_t HasCoverageOutput;
+  /* Output registers declared uint/sint in the DXBC signature.
+   * Float-declared outputs are redeclared to match an integer RTV
+   * (see uint/sint_output_reg_mask), so only these registers can
+   * still type-mismatch an integer attachment. */
+  uint32_t UintOutputRegisterMask;
+  uint32_t SintOutputRegisterMask;
 };
 
 struct MTL_SHADER_REFLECTION {
@@ -255,6 +261,11 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA {
   uint32_t unorm_output_reg_mask;
   /** MTLPixelFormat */
   uint32_t pixel_formats[8];
+  /* Float-typed output registers redeclared as uint/int because the
+   * bound RTV has an integer format (undefined in D3D11; real hardware
+   * bit-reinterprets, and Metal rejects the pipeline otherwise). */
+  uint32_t uint_output_reg_mask;
+  uint32_t sint_output_reg_mask;
 };
 
 struct SM50_IA_INPUT_ELEMENT {

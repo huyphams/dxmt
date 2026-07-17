@@ -170,6 +170,8 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(getGlobalShaderFlag());
   h.update(variant.sample_mask);
   h.update(variant.unorm_output_reg_mask);
+  h.update(variant.uint_output_reg_mask);
+  h.update(variant.sint_output_reg_mask);
   h.update(variant.dual_source_blending);
   h.update(variant.disable_depth_output);
   auto variant_digest = h.final();
@@ -184,6 +186,8 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     data.disable_depth_output = variant.disable_depth_output;
     data.unorm_output_reg_mask = variant.unorm_output_reg_mask;
     memset(data.pixel_formats, 0, sizeof(data.pixel_formats));
+    data.uint_output_reg_mask = variant.uint_output_reg_mask;
+    data.sint_output_reg_mask = variant.sint_output_reg_mask;
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;

@@ -260,6 +260,8 @@ struct SignatureContext {
   uint32_t pso_sample_mask;
   // it is considered optional (as a hint)
   air::MTLPixelFormat pixel_formats[8];
+  uint32_t uint_output_reg_mask;
+  uint32_t sint_output_reg_mask;
 
   SignatureContext(
       Prologues &prologue, Epilogues &epilogue, air::FunctionSignatureBuilder &func_signature, io_binding_map &resource
@@ -274,6 +276,8 @@ struct SignatureContext {
       skip_vertex_output(false),
       pull_mode_reg_mask(0),
       unorm_output_reg_mask(0),
+      uint_output_reg_mask(0),
+      sint_output_reg_mask(0),
       pso_sample_mask(0xffffffff) {
     memset(pixel_formats, 0, sizeof(pixel_formats));
   };
@@ -358,6 +362,9 @@ public:
   uint32_t max_input_register = 0;
   uint32_t max_output_register = 0;
   uint32_t pso_valid_output_reg_mask = 0;
+  /* PS output registers declared uint/sint in the DXBC signature */
+  uint32_t ps_output_declared_uint_mask = 0;
+  uint32_t ps_output_declared_sint_mask = 0;
   uint32_t max_patch_constant_output_register = 0;
   std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection_cbuffer;
   std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection;
