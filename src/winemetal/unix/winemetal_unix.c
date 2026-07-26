@@ -1884,7 +1884,11 @@ _MTLCommandEncoder_setLabel(void *args) {
 static NTSTATUS
 _MTLDevice_setShouldMaximizeConcurrentCompilation(void *args) {
   struct unixcall_generic_obj_uint64_noret *params = args;
-  [(id<MTLDevice>)params->handle setShouldMaximizeConcurrentCompilation:(BOOL)params->arg];
+#if TARGET_OS_OSX
+  if (@available(macOS 13.3, *)) {
+    [(id<MTLDevice>)params->handle setShouldMaximizeConcurrentCompilation:(BOOL)params->arg];
+  }
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -3017,12 +3021,18 @@ _MTLDevice_newTileRenderPipelineState(void *obj) {
 static NTSTATUS
 _MTLDevice_newResidencySet(void *obj) {
   struct unixcall_mtldevice_newresidencyset *params = obj;
-  NSError *err = NULL;
-  MTLResidencySetDescriptor *descriptor = [[MTLResidencySetDescriptor alloc] init];
-  descriptor.initialCapacity = params->init_capacity;
-  params->ret_set = (obj_handle_t)[(id<MTLDevice>)params->device newResidencySetWithDescriptor:descriptor error:&err];
-  params->ret_error = (obj_handle_t)[err retain];
-  [descriptor release];
+  params->ret_set = 0;
+  params->ret_error = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  if (@available(macOS 15, *)) {
+    NSError *err = NULL;
+    MTLResidencySetDescriptor *descriptor = [[MTLResidencySetDescriptor alloc] init];
+    descriptor.initialCapacity = params->init_capacity;
+    params->ret_set = (obj_handle_t)[(id<MTLDevice>)params->device newResidencySetWithDescriptor:descriptor error:&err];
+    params->ret_error = (obj_handle_t)[err retain];
+    [descriptor release];
+  }
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -3061,9 +3071,13 @@ _MTLResidencySet_commit(void *obj) {
 static NTSTATUS
 _MTLCommandQueue_addResidencySet(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;
-  id<MTLCommandQueue> queue = (id<MTLCommandQueue>)params->handle;
-  id<MTLResidencySet> set = (id<MTLResidencySet>)params->arg;
-  [queue addResidencySet:set];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  if (@available(macOS 15, *)) {
+    id<MTLCommandQueue> queue = (id<MTLCommandQueue>)params->handle;
+    id<MTLResidencySet> set = (id<MTLResidencySet>)params->arg;
+    [queue addResidencySet:set];
+  }
+#endif
   return STATUS_SUCCESS;
 }
 
