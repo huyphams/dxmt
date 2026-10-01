@@ -528,7 +528,11 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
   flags.set(finalDesc.CPUAccessFlags ? TextureAllocationFlag::GpuManaged : TextureAllocationFlag::GpuPrivate);
   if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
     flags.set(TextureAllocationFlag::ShaderReadonly);
-  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
+  /* Changed for VMPal, 2026-10-01: a GPU-readonly resource isn't tracked,
+   * which is safe only when its contents come with it.  A client can create
+   * an immutable resource without data and fill it after (Neptune does), and
+   * then a read could start before that write had landed. */
+  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE && pInitialData)
     flags.set(TextureAllocationFlag::GpuReadonly);
   if (single_subresource && (finalDesc.BindFlags & D3D11_BIND_DEPTH_STENCIL)) {
     Rc<RenamableTexturePool> renamable = new RenamableTexturePool(texture.ptr(), 32, flags);
