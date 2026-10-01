@@ -439,7 +439,21 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
       if (FAILED(hr))
         return hr;
       texture = std::move(shm_texture);
-      initialize(std::move(shm_allocation));
+      /* Changed for VMPal, 2026-10-01: keep shared textures away from the
+       * resource initializer. A fresh shm object reads as zero, and initial
+       * data can be copied straight into the mapping. The initializer's GPU
+       * clear was seen landing after a new texture's first writes and wiping
+       * them: the opaque texel DirectComposition keeps at (0,0) of each atlas
+       * came out transparent, and DWM drew text batched against it blank. */
+      if (pInitialData) {
+        const D3D11_SUBRESOURCE_DATA &data = pInitialData[0];
+        auto dst = reinterpret_cast<uint8_t *>(shm_allocation->mappedMemory);
+        auto src = reinterpret_cast<const uint8_t *>(data.pSysMem);
+        size_t row_bytes = std::min<size_t>((size_t)finalDesc.Width * format_desc.BytesPerTexel, data.SysMemPitch);
+        for (unsigned row = 0; dst && src && row < finalDesc.Height; row++)
+          memcpy(dst + row * pod.stride, src + (size_t)row * data.SysMemPitch, row_bytes);
+      }
+      texture->rename(std::move(shm_allocation));
       *ppTexture = reinterpret_cast<typename tag::COM_IMPL *>(
           ref(new DeviceTexture<tag>(&finalDesc, std::move(texture), pod, pDevice))
       );
