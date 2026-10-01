@@ -439,7 +439,21 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
       if (FAILED(hr))
         return hr;
       texture = std::move(shm_texture);
-      initialize(std::move(shm_allocation));
+      /* Changed for VMPal, 2026-10-01: keep shared textures away from the
+       * resource initializer. A fresh shm object reads as zero, and initial
+       * data can be copied straight into the mapping. The initializer's GPU
+       * clear was seen landing after a new texture's first writes and wiping
+       * them: the opaque texel DirectComposition keeps at (0,0) of each atlas
+       * came out transparent, and DWM drew text batched against it blank. */
+      if (pInitialData) {
+        const D3D11_SUBRESOURCE_DATA &data = pInitialData[0];
+        auto dst = reinterpret_cast<uint8_t *>(shm_allocation->mappedMemory);
+        auto src = reinterpret_cast<const uint8_t *>(data.pSysMem);
+        size_t row_bytes = std::min<size_t>((size_t)finalDesc.Width * format_desc.BytesPerTexel, data.SysMemPitch);
+        for (unsigned row = 0; dst && src && row < finalDesc.Height; row++)
+          memcpy(dst + row * pod.stride, src + (size_t)row * data.SysMemPitch, row_bytes);
+      }
+      texture->rename(std::move(shm_allocation));
       *ppTexture = reinterpret_cast<typename tag::COM_IMPL *>(
           ref(new DeviceTexture<tag>(&finalDesc, std::move(texture), pod, pDevice))
       );
@@ -514,7 +528,11 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
   flags.set(finalDesc.CPUAccessFlags ? TextureAllocationFlag::GpuManaged : TextureAllocationFlag::GpuPrivate);
   if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
     flags.set(TextureAllocationFlag::ShaderReadonly);
-  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
+  /* Changed for VMPal, 2026-10-01: a GPU-readonly resource isn't tracked,
+   * which is safe only when its contents come with it.  A client can create
+   * an immutable resource without data and fill it after (Neptune does), and
+   * then a read could start before that write had landed. */
+  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE && pInitialData)
     flags.set(TextureAllocationFlag::GpuReadonly);
   if (single_subresource && (finalDesc.BindFlags & D3D11_BIND_DEPTH_STENCIL)) {
     Rc<RenamableTexturePool> renamable = new RenamableTexturePool(texture.ptr(), 32, flags);

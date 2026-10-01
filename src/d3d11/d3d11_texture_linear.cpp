@@ -51,7 +51,9 @@ TDynamicLinearTexture(
     if (!this->m_parent->IsTraced() && pDesc->Usage == D3D11_USAGE_DYNAMIC)
       flags.set(TextureAllocationFlag::CpuWriteCombined);
     // if (pDesc->Usage != D3D11_USAGE_DEFAULT)
-    if (pDesc->Usage == D3D11_USAGE_IMMUTABLE)
+    /* Changed for VMPal, 2026-10-01: readonly (untracked) only when the
+     * contents come with the texture; see CreateDeviceTextureInternal. */
+    if (pDesc->Usage == D3D11_USAGE_IMMUTABLE && pInitialData)
       flags.set(TextureAllocationFlag::GpuReadonly);
     if (pDesc->Usage != D3D11_USAGE_DYNAMIC)
       flags.set(TextureAllocationFlag::GpuManaged);

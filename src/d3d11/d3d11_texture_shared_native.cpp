@@ -182,10 +182,11 @@ AllocateShmLinearTexture2D(
   linear_info.mach_port = 0;
   linear_info.options = WMTResourceHazardTrackingModeUntracked;
 
+  /* Changed for VMPal, 2026-10-01: never readonly (untracked).  The
+   * creator may fill an immutable texture after creating it, and an importer
+   * sees another process's writes. */
   Flags<TextureAllocationFlag> flags;
   flags.set(TextureAllocationFlag::Shared);
-  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
-    flags.set(TextureAllocationFlag::GpuReadonly);
   if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
     flags.set(TextureAllocationFlag::ShaderReadonly);
 
