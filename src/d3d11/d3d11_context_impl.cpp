@@ -1224,8 +1224,29 @@ public:
         // Per MSDN: The CPU copies data from memory to a subresource created in non-mappable memory.
         // Also MSDN: A resource cannot be used as a destination if: the resource is created with immutable or
         // dynamic usage.
-        // So it's legal?
-        UNIMPLEMENTED("update buffer: staging");
+        // Changed for VMPal, 2026-10-08.
+        // So it's legal: the data goes through an upload buffer and lands as a copy into the staging buffer, in order
+        // with the context's other copies, as one into a staging resource does (Minecraft for Windows does this).
+        if (copy_offset > staging->length || copy_len > staging->length - copy_offset) {
+          ERR("UpdateSubresource1: box out of the staging buffer's bounds (", copy_offset, "+", copy_len, ")");
+          return;
+        }
+        auto [upload, upload_offset] = AllocateStagingBuffer(copy_len, 16);
+        upload.updateContents(upload_offset, pSrcData, copy_len);
+        SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
+        UseCopyDestination(staging);
+        EmitOP([upload, upload_offset, dst_ = std::move(staging), copy_offset,
+                copy_len](ArgumentEncodingContext &enc) {
+          auto [dst_buffer, dst_offset] = enc.access(dst_->buffer(), copy_offset, copy_len, ResourceAccess::Write);
+          auto &cmd = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+          cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
+          cmd.copy_length = copy_len;
+          cmd.src = upload;
+          cmd.src_offset = upload_offset;
+          cmd.dst = dst_buffer->buffer();
+          cmd.dst_offset = copy_offset + dst_offset;
+        });
+        promote_flush = true;
       } else if (auto bindable = GetResourceCommon(pDstResource)) {
         auto [staging_buffer, offset] = AllocateStagingBuffer(copy_len, 16);
         staging_buffer.updateContents(offset, pSrcData, copy_len);
@@ -4541,8 +4562,51 @@ public:
         cmd_cptex.origin = cmd.DstOrigin;
       });
     } else if (auto staging_dst = GetStagingResource(cmd.pDst, cmd.DstSubresource)) {
-      // staging: ...
-      UNIMPLEMENTED("update texture: staging");
+      // Changed for VMPal, 2026-10-08.
+      // staging: memory, a row of texels (of blocks, compressed) every bytesPerRow, an image every bytesPerImage. The
+      // box's rows go through an upload buffer and land as copies into it, in order with the context's other copies, as
+      // a copy into a staging resource does.
+      bool blocks = cmd.DstFormat.Flag & MTL_DXGI_FORMAT_BC;
+      uint64_t dst_offset = (uint64_t)cmd.DstOrigin.z * staging_dst->bytesPerImage +
+                            (uint64_t)(blocks ? cmd.DstOrigin.y >> 2 : cmd.DstOrigin.y) * staging_dst->bytesPerRow +
+                            (uint64_t)(blocks ? cmd.DstOrigin.x >> 2 : cmd.DstOrigin.x) * cmd.DstFormat.BytesPerTexel;
+      uint32_t row_bytes = cmd.EffectiveBytesPerRow;
+      uint32_t rows = cmd.EffectiveRows;
+      uint32_t slices = cmd.DstSize.depth;
+      uint64_t end = dst_offset + (uint64_t)(slices - 1) * staging_dst->bytesPerImage +
+                     (uint64_t)(rows - 1) * staging_dst->bytesPerRow + row_bytes;
+      if (row_bytes > staging_dst->bytesPerRow || end > staging_dst->length) {
+        ERR("UpdateTexture: box out of the staging texture's bounds (", end, " > ", staging_dst->length, ")");
+        return;
+      }
+      auto [upload, upload_offset] = AllocateStagingBuffer((size_t)row_bytes * rows * slices, 16);
+      for (unsigned slice = 0; slice < slices; slice++) {
+        for (unsigned row = 0; row < rows; row++) {
+          const char *src = ((const char *)pSrcData) + row * SrcRowPitch + slice * SrcDepthPitch;
+          upload.updateContents(upload_offset + ((size_t)slice * rows + row) * row_bytes, src, row_bytes);
+        }
+      }
+      SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
+      UseCopyDestination(staging_dst);
+      EmitOP([upload, upload_offset, dst_ = std::move(staging_dst), dst_offset, row_bytes, rows,
+              slices](ArgumentEncodingContext &enc) {
+        auto [dst, dst_sub_offset] = enc.access(dst_->buffer(), 0, dst_->length, ResourceAccess::Write);
+        // Whole rows are one copy an image; a narrower box, one copy a row.
+        bool whole_rows = row_bytes == dst_->bytesPerRow;
+        for (unsigned slice = 0; slice < slices; slice++) {
+          for (unsigned row = 0; row < (whole_rows ? 1 : rows); row++) {
+            auto &cmd_cpbuf = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+            cmd_cpbuf.type = WMTBlitCommandCopyFromBufferToBuffer;
+            cmd_cpbuf.copy_length = whole_rows ? (uint64_t)row_bytes * rows : row_bytes;
+            cmd_cpbuf.src = upload;
+            cmd_cpbuf.src_offset = upload_offset + ((size_t)slice * rows + row) * row_bytes;
+            cmd_cpbuf.dst = dst->buffer();
+            cmd_cpbuf.dst_offset = dst_sub_offset + dst_offset + (uint64_t)slice * dst_->bytesPerImage +
+                                   (uint64_t)row * dst_->bytesPerRow;
+          }
+        }
+      });
+      promote_flush = true;
     } else {
       UNREACHABLE
     }
