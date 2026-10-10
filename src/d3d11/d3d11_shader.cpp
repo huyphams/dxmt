@@ -174,6 +174,8 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.sint_output_reg_mask);
   h.update(variant.dual_source_blending);
   h.update(variant.disable_depth_output);
+  if (variant.forced_sample_count)
+    h.update(variant.forced_sample_count);
   auto variant_digest = h.final();
   std::string func_name = "ps_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
 
@@ -187,6 +189,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     data.unorm_output_reg_mask = variant.unorm_output_reg_mask;
     data.uint_output_reg_mask = variant.uint_output_reg_mask;
     data.sint_output_reg_mask = variant.sint_output_reg_mask;
+    data.forced_sample_count = variant.forced_sample_count;
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;

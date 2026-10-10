@@ -106,8 +106,10 @@ struct ShaderVariantPixel {
   uint32_t unorm_output_reg_mask;
   uint32_t uint_output_reg_mask;
   uint32_t sint_output_reg_mask;
+  uint32_t forced_sample_count;
   bool operator==(const this_type &rhs) const {
     return sample_mask == rhs.sample_mask &&
+           forced_sample_count == rhs.forced_sample_count &&
            dual_source_blending == rhs.dual_source_blending &&
            disable_depth_output == rhs.disable_depth_output &&
            unorm_output_reg_mask == rhs.unorm_output_reg_mask &&

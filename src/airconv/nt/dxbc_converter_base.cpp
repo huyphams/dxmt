@@ -252,6 +252,16 @@ Converter::LoadOperand(const SrcOperandAttribute &SrcOp, mask_t Mask) {
     break;
   }
   case InputAttribute::CoverageMask: {
+    if (ctx.pso_forced_sample_count > 1) {
+      // Changed for VMPal, 2026-10-10.
+      // Target-independent rasterization: Metal rasterized one sample, so report every forced sample of a pixel it
+      // shades (none for a helper lane). Direct2D counts them to fill paths, which came out at 1/16 of their alpha.
+      uint32_t forced_mask = (uint32_t)((1ull << std::min(ctx.pso_forced_sample_count, 32u)) - 1);
+      Ret = ir.CreateSelect(
+          ir.CreateICmpNE(res.coverage_mask_arg, ir.getInt32(0)), ir.getInt32(forced_mask), ir.getInt32(0)
+      );
+      break;
+    }
     Ret = ctx.pso_sample_mask != 0xffffffff ? ir.CreateAnd(res.coverage_mask_arg, ctx.pso_sample_mask)
                                             : res.coverage_mask_arg;
     break;

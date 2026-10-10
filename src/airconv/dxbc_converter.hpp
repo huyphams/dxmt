@@ -232,6 +232,7 @@ struct context {
   uint32_t pso_sample_mask;
   microsoft::D3D10_SB_TOKENIZED_PROGRAM_TYPE shader_type;
   SM50_SHADER_METAL_VERSION metal_version;
+  uint32_t pso_forced_sample_count = 0;
 };
 
 template <typename S> IRValue make_irvalue(S &&fs) {

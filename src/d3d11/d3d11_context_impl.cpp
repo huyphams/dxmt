@@ -3077,6 +3077,9 @@ public:
         if (current_rs->IsScissorEnabled() != expected->IsScissorEnabled()) {
           dirty_state.set(DirtyState::Scissors);
         }
+        if (current_rs->ForcedSampleCount() != expected->ForcedSampleCount()) {
+          InvalidateRenderPipeline();
+        }
         state_.Rasterizer.RasterizerState = expected.ptr();
         dirty_state.set(DirtyState::RasterizerState);
       } else {
@@ -3086,6 +3089,9 @@ public:
       if (state_.Rasterizer.RasterizerState) {
         if (state_.Rasterizer.RasterizerState->IsScissorEnabled() != default_rasterizer_state->IsScissorEnabled()) {
           dirty_state.set(DirtyState::Scissors);
+        }
+        if (state_.Rasterizer.RasterizerState->ForcedSampleCount() != default_rasterizer_state->ForcedSampleCount()) {
+          InvalidateRenderPipeline();
         }
       }
       state_.Rasterizer.RasterizerState = nullptr;
@@ -4980,10 +4986,12 @@ public:
       Desc.SOLayout = nullptr;
     }
     Desc.NumColorAttachments = state_.OutputMerger.NumRTVs;
+    bool any_rtv = false;
     for (unsigned i = 0; i < ARRAYSIZE(state_.OutputMerger.RTVs); i++) {
       auto &rtv = state_.OutputMerger.RTVs[i];
       if (rtv && i < Desc.NumColorAttachments) {
         Desc.ColorAttachmentFormats[i] = state_.OutputMerger.RTVs[i]->pixelFormat();
+        any_rtv = true;
       } else {
         Desc.ColorAttachmentFormats[i] = WMTPixelFormatInvalid;
       }
@@ -5015,6 +5023,14 @@ public:
       Desc.IndexBufferFormat = SM50_INDEX_BUFFER_FORMAT_NONE;
     }
     Desc.SampleCount = state_.OutputMerger.SampleCount;
+    // Changed for VMPal, 2026-10-10.
+    // Target-independent rasterization into single-sample render targets (Direct2D's path fills): the pixel shader
+    // reports the forced samples (see airconv). UAV-only passes rasterize their forced samples already.
+    auto forced_sample_count =
+        (state_.Rasterizer.RasterizerState ? state_.Rasterizer.RasterizerState : default_rasterizer_state)
+            ->ForcedSampleCount();
+    Desc.ForcedSampleCount =
+        any_rtv && !state_.OutputMerger.DSV && Desc.SampleCount == 1 && forced_sample_count > 1 ? forced_sample_count : 0;
   }
 
   template <bool IndexedDraw>
