@@ -257,6 +257,13 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA {
    * bit-reinterprets, and Metal rejects the pipeline otherwise). */
   uint32_t uint_output_reg_mask;
   uint32_t sint_output_reg_mask;
+  /* Changed for VMPal, 2026-10-10.
+   * Target-independent rasterization: the rasterizer state's
+   * ForcedSampleCount (above 1) while single-sample render targets are
+   * bound. Metal can't rasterize more samples than its attachments
+   * have, so SV_Coverage reports every forced sample of a shaded pixel
+   * instead of the one sample Metal saw. */
+  uint32_t forced_sample_count;
 };
 
 struct SM50_IA_INPUT_ELEMENT {

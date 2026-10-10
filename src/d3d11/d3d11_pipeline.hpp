@@ -26,6 +26,7 @@ struct MTL_GRAPHICS_PIPELINE_DESC {
   SM50_INDEX_BUFFER_FORMAT IndexBufferFormat;
   uint32_t SampleMask;
   uint32_t GSPassthrough;
+  uint32_t ForcedSampleCount;
 };
 
 struct MTL_COMPUTE_PIPELINE_DESC {
@@ -65,6 +66,7 @@ template <> struct hash<MTL_GRAPHICS_PIPELINE_DESC> {
     state.add((size_t)v.SampleMask);
     state.add((size_t)v.GSPassthrough);
     state.add((size_t)v.SampleCount);
+    state.add((size_t)v.ForcedSampleCount);
     state.add((size_t)v.NumColorAttachments);
     for (unsigned i = 0; i < v.NumColorAttachments; i++) {
       state.add(v.ColorAttachmentFormats[i]);
@@ -133,6 +135,7 @@ template <> struct equal_to<MTL_GRAPHICS_PIPELINE_DESC> {
            (x.SampleCount == y.SampleCount) &&
            (x.IndexBufferFormat == y.IndexBufferFormat) &&
            (x.SampleMask == y.SampleMask) &&
+           (x.ForcedSampleCount == y.ForcedSampleCount) &&
            (x.GSPassthrough == y.GSPassthrough);
   }
 };
