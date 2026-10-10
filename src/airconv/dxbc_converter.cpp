@@ -328,6 +328,7 @@ llvm::Error convert_dxbc_pixel_shader(
   uint32_t *pso_pixel_formats = nullptr;
   uint32_t pso_uint_output_reg_mask = 0;
   uint32_t pso_sint_output_reg_mask = 0;
+  uint32_t pso_forced_sample_count = 0;
   SM50_SHADER_PSO_PIXEL_SHADER_DATA *pso_data = nullptr;
   if (args_get_data<SM50_SHADER_PSO_PIXEL_SHADER, SM50_SHADER_PSO_PIXEL_SHADER_DATA>(pArgs, &pso_data)) {
     pso_dual_source_blending = pso_data->dual_source_blending;
@@ -337,6 +338,7 @@ llvm::Error convert_dxbc_pixel_shader(
     pso_sint_output_reg_mask = pso_data->sint_output_reg_mask;
     pso_sample_mask = pso_data->sample_mask;
     pso_pixel_formats = pso_data->pixel_formats;
+    pso_forced_sample_count = pso_data->forced_sample_count;
   }
   SM50_SHADER_METAL_VERSION metal_version = SM50_SHADER_METAL_310;
   SM50_SHADER_FLAG shader_flags = {};
@@ -433,6 +435,7 @@ llvm::Error convert_dxbc_pixel_shader(
       .pso_sample_mask = pso_sample_mask,
       .shader_type = pShaderInternal->shader_type,
       .metal_version = metal_version,
+      .pso_forced_sample_count = pso_forced_sample_count,
   };
 
   IOHelper io(air, function, types, resource_map);
