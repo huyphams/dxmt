@@ -973,7 +973,8 @@ AIRBuilder::CreateTextureQuery(const Texture &Texture, Value *Handle, Texture::Q
 
   auto Fn = getModule()->getOrInsertFunction(FnName, FunctionType::get(getIntTy(), Tys, false), Attrs);
 
-  return builder.CreateCall(Fn, Ops);
+  // Changed for VMPal, 2026-10-21: from 3Shain/dxmt 64ee6f5.
+  return builder.CreateSelect(builder.CreateIsNull(Handle), builder.getInt32(0), builder.CreateCall(Fn, Ops));
 }
 
 std::pair<Value *, Value *>
@@ -1483,7 +1484,8 @@ AIRBuilder::CreateInterpolateAtOffset(Value *Interpoant, Value *Offset, bool Per
 
   auto Fn = getModule()->getOrInsertFunction(
       Perspective ? "air.interpolate_offset_perspective.v4f32" : "air.interpolate_offset_no_perspective.v4f32",
-      FunctionType::get(getFloatTy(4), {Interpoant->getType(), getIntTy(2)}, false), Attrs
+      // Changed for VMPal, 2026-10-14: from 3Shain/dxmt ae91269.
+      FunctionType::get(getFloatTy(4), {Interpoant->getType(), getFloatTy(2)}, false), Attrs
   );
 
   return builder.CreateCall(Fn, {Interpoant, Offset});
@@ -1780,6 +1782,7 @@ AIRBuilder::CreateIntBinOp(IntBinOp Op, Value *LHS, Value *RHS, bool Signed) {
   static char const *FnNames[] = {
       "max",
       "min",
+      "mul_hi", // Changed for VMPal, 2026-10-14: from 3Shain/dxmt ae91269
   };
 
   if (uint32_t(Op) >= std::size(FnNames)) {

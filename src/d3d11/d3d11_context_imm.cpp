@@ -602,6 +602,8 @@ public:
   };
 
   HRESULT STDMETHODCALLTYPE Signal(ID3D11Fence *pFence, UINT64 Value) override {
+    // Changed for VMPal, 2026-10-14: from 3Shain/dxmt 0b63990.
+    std::lock_guard<d3d11_device_mutex> lock(mutex);
     auto fence = static_cast<MTLD3D11Fence *>(pFence);
 
     InvalidateCurrentPass();
@@ -614,6 +616,8 @@ public:
   }
 
   HRESULT STDMETHODCALLTYPE Wait(ID3D11Fence *pFence, UINT64 Value) override {
+    // Changed for VMPal, 2026-10-14: from 3Shain/dxmt 0b63990.
+    std::lock_guard<d3d11_device_mutex> lock(mutex);
     auto fence = static_cast<MTLD3D11Fence *>(pFence);
 
     Flush();

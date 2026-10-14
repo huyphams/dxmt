@@ -330,6 +330,7 @@ public:
   MTL_DXGI_FORMAT_DESC SrcFormat;
   MTL_DXGI_FORMAT_DESC DstFormat;
 
+  bool DimensionIncompatible; // Changed for VMPal, 2026-10-21: from 3Shain/dxmt e40c9d7
   bool Invalid = true;
 
   TextureCopyCommand(
@@ -341,9 +342,10 @@ public:
       SrcSubresource(SrcSubresource),
       DstSubresource(DstSubresource),
       SrcFormat(Src_.FormatDescription),
-      DstFormat(Dst_.FormatDescription) {
-    if (Dst_.Dimension != Src_.Dimension)
-      return;
+      DstFormat(Dst_.FormatDescription),
+      DimensionIncompatible(Dst_.Dimension != Src_.Dimension) {
+    // Changed for VMPal, 2026-10-21: from 3Shain/dxmt e40c9d7, a copy between texture dimensions, each side's
+    // subresource checked against its own resource.
 
     if (SrcFormat.PixelFormat == WMTPixelFormatInvalid)
       return;
@@ -356,14 +358,7 @@ public:
     }
     case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
       D3D11_TEXTURE1D_DESC &dst_desc = Dst_.Texture1DDesc;
-      D3D11_TEXTURE1D_DESC &src_desc = Src_.Texture1DDesc;
-
-      Src.Format = src_desc.Format;
-      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
-      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
-      Src.Height = 1;
-      Src.Depth = 1;
+      if (DstSubresource >= dst_desc.MipLevels * dst_desc.ArraySize) return;
 
       Dst.Format = dst_desc.Format;
       Dst.MipLevel = DstSubresource % dst_desc.MipLevels;
@@ -375,14 +370,7 @@ public:
     }
     case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
       D3D11_TEXTURE2D_DESC1 &dst_desc = Dst_.Texture2DDesc;
-      D3D11_TEXTURE2D_DESC1 &src_desc = Src_.Texture2DDesc;
-
-      Src.Format = src_desc.Format;
-      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
-      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
-      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
-      Src.Depth = 1;
+      if (DstSubresource >= dst_desc.MipLevels * dst_desc.ArraySize) return;
 
       Dst.Format = dst_desc.Format;
       Dst.MipLevel = DstSubresource % dst_desc.MipLevels;
@@ -394,14 +382,7 @@ public:
     }
     case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
       D3D11_TEXTURE3D_DESC1 &dst_desc = Dst_.Texture3DDesc;
-      D3D11_TEXTURE3D_DESC1 &src_desc = Src_.Texture3DDesc;
-
-      Src.Format = src_desc.Format;
-      Src.MipLevel = SrcSubresource;
-      Src.ArraySlice = 0;
-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
-      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
-      Src.Depth = std::max(1u, src_desc.Depth >> Src.MipLevel);
+      if (DstSubresource >= dst_desc.MipLevels) return;
 
       Dst.Format = dst_desc.Format;
       Dst.MipLevel = DstSubresource;
@@ -409,7 +390,50 @@ public:
       Dst.Width = std::max(1u, dst_desc.Width >> Dst.MipLevel);
       Dst.Height = std::max(1u, dst_desc.Height >> Dst.MipLevel);
       Dst.Depth = std::max(1u, dst_desc.Depth >> Dst.MipLevel);
+      break;
+    }
+    }
 
+    switch (Src_.Dimension) {
+    default: {
+      return;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+      D3D11_TEXTURE1D_DESC &src_desc = Src_.Texture1DDesc;
+      if (SrcSubresource >= src_desc.MipLevels * src_desc.ArraySize) return;
+
+      Src.Format = src_desc.Format;
+      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
+      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
+      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+      Src.Height = 1;
+      Src.Depth = 1;
+
+      break;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+      D3D11_TEXTURE2D_DESC1 &src_desc = Src_.Texture2DDesc;
+      if (SrcSubresource >= src_desc.MipLevels * src_desc.ArraySize) return;
+
+      Src.Format = src_desc.Format;
+      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
+      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
+      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
+      Src.Depth = 1;
+
+      break;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+      D3D11_TEXTURE3D_DESC1 &src_desc = Src_.Texture3DDesc;
+      if (SrcSubresource >= src_desc.MipLevels) return;
+
+      Src.Format = src_desc.Format;
+      Src.MipLevel = SrcSubresource;
+      Src.ArraySlice = 0;
+      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
+      Src.Depth = std::max(1u, src_desc.Depth >> Src.MipLevel);
       break;
     }
     }
@@ -1120,6 +1144,9 @@ public:
       break;
     }
     default:
+      // Changed for VMPal, 2026-10-21: from 3Shain/dxmt e40c9d7.
+      if (Src.Dimension == D3D11_RESOURCE_DIMENSION_BUFFER)
+        return;
       CopyTexture(TextureCopyCommand(Dst, DstSubresource, DstX, DstY, DstZ, Src, SrcSubresource, pSrcBox));
       break;
     }
@@ -3772,7 +3799,7 @@ public:
           entry.Offset = pOffsets[slot - StartSlot];
         } else {
           ERR("SetVertexBuffers: offset is null");
-          entry.Stride = 0;
+          entry.Offset = 0; // Changed for VMPal, 2026-10-14: from 3Shain/dxmt a22700c
         }
         entry.Buffer = pVertexBuffer;
           EmitST([=, buffer = entry.Buffer->buffer(), offset = entry.Offset,
@@ -4148,7 +4175,8 @@ public:
           auto dst_format = dst_->pixelFormat();
           auto src = enc.access(src_, cmd.Src.MipLevel, cmd.Src.ArraySlice, ResourceAccess::Read);
           auto dst = enc.access(dst_, cmd.Dst.MipLevel, cmd.Dst.ArraySlice, ResourceAccess::Write);
-          if (Forget_sRGB(dst_format) != Forget_sRGB(src_format)) {
+          // Changed for VMPal, 2026-10-21: from 3Shain/dxmt e40c9d7.
+          if (Forget_sRGB(dst_format) != Forget_sRGB(src_format) || cmd.DimensionIncompatible) {
 
             if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
               /* the textures hold texels, not block bytes: reinterpreting

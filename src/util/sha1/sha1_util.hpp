@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <functional> // Changed for VMPal, 2026-10-14: from 3Shain/dxmt e67727f
 #include "./sha1.h"
 
 namespace dxmt {
