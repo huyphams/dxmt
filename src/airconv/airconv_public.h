@@ -5,7 +5,9 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-#define AIRCONV_VERSION 32
+/* Changed for VMPal, 2026-10-14: from 3Shain/dxmt ae91269 and d1c926c change shaders
+ * this compiles, so the shader cache keys on 33, not 32. */
+#define AIRCONV_VERSION 33
 
 #ifdef __cplusplus
 #include <string>

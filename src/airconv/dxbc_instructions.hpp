@@ -21,6 +21,7 @@
 #include "shader_common.hpp"
 #include <array>
 #include <map>
+#include <string> // Changed for VMPal, 2026-10-14: from 3Shain/dxmt 04d43e6
 #include <string_view>
 #include <variant>
 #include "packed_variant_list.hpp"

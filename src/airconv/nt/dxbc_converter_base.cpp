@@ -1021,7 +1021,11 @@ Converter::operator()(const InstIntegerUnaryOp &unary) {
   case IntegerUnaryOp::FirstHiBitSigned:
     Value = ir.CreateSelect(
         ir.CreateIsNotNeg(Value), air.CreateCountZero(Value, false),
-        ir.CreateAdd(air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), ir.getInt32(1)), false), ir.getInt32(1))
+        // Changed for VMPal, 2026-10-14: from 3Shain/dxmt d1c926c.
+        ir.CreateAdd(
+            air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), 1ull), false),
+            llvm::ConstantInt::get(Value->getType(), 1)
+        )
     );
     Value = MaxIfInMask(~((uint32_t)0x1f), Value);
     break;

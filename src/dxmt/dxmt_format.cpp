@@ -201,7 +201,8 @@ FormatCapabilityInspector::Inspect(WMT::Device device) {
     APPEND_CAP(WMTPixelFormatRG8Sint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_READ_OR_WRITE)
 
     APPEND_CAP(WMTPixelFormatR32Uint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_ALL_CAP | FormatCapability::Atomic)
-    APPEND_CAP(WMTPixelFormatR32Uint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_ALL_CAP | FormatCapability::Atomic)
+    // Changed for VMPal, 2026-10-14: from 3Shain/dxmt a22700c.
+    APPEND_CAP(WMTPixelFormatR32Sint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_ALL_CAP | FormatCapability::Atomic)
     APPEND_CAP(WMTPixelFormatR32Float, ALL_CAP | TEXTURE_BUFFER_ALL_CAP)
 
     APPEND_CAP(WMTPixelFormatRG16Unorm, ALL_CAP | TEXTURE_BUFFER_READ_OR_WRITE)
