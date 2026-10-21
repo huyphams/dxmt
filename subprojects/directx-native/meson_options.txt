@@ -1,0 +1,7 @@
+# Copyright 2026 Turing Software LLC
+# SPDX-License-Identifier: Apache-2.0
+
+option('tests', type: 'boolean', value: true,
+       description: 'Build the unit tests (only when built as the main project)')
+option('install_headers', type: 'boolean', value: false,
+       description: 'Install the headers, for a consumer whose own installed headers include them (the archive is never installed)')
