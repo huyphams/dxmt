@@ -242,7 +242,35 @@ Buffer::allocateExternal(int fd, uint64_t backing_length, Flags<BufferAllocation
     close(owned_fd);
     return {};
   }
+  return wrapExternal(owned_fd, mapping, backing_length, flags, cookie);
+#endif
+}
 
+Rc<BufferAllocation>
+Buffer::allocateExternalWindow(int fd, uint64_t offset, uint64_t length, Flags<BufferAllocationFlag> flags) {
+#ifndef __APPLE__
+  (void)fd;
+  (void)offset;
+  (void)length;
+  (void)flags;
+  return {};
+#else
+  const uint64_t page = (uint64_t)getpagesize();
+  if (fd < 0 || length < length_ || ((offset | length) & (page - 1)) || flags.test(BufferAllocationFlag::CpuInvisible))
+    return {};
+  void *mapping = mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)offset);
+  if (mapping == MAP_FAILED)
+    return {};
+  return wrapExternal(-1, mapping, length, flags, BufferAllocation::kNoExternalCookie);
+#endif
+}
+
+Rc<BufferAllocation>
+Buffer::wrapExternal(int owned_fd, void *mapping, uint64_t backing_length, Flags<BufferAllocationFlag> flags,
+                     uint32_t cookie) {
+#ifndef __APPLE__
+  return {};
+#else
   WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
   if (flags.test(BufferAllocationFlag::CpuWriteCombined))
     options |= WMTResourceOptionCPUCacheModeWriteCombined;
@@ -260,7 +288,8 @@ Buffer::allocateExternal(int fd, uint64_t backing_length, Flags<BufferAllocation
   Rc<BufferAllocation> allocation = new BufferAllocation(device_, info, flags);
   if (allocation->buffer().handle == NULL_OBJECT_HANDLE) {
     munmap(mapping, backing_length);
-    close(owned_fd);
+    if (owned_fd >= 0)
+      close(owned_fd);
     return {};
   }
   allocation->external_backing_ = std::make_unique<ExternalBufferBacking>(owned_fd, mapping, backing_length);

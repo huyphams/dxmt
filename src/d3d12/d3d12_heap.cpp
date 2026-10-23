@@ -19,6 +19,9 @@
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
+#ifdef DXMT_NATIVE
+#include <unistd.h>
+#endif
 
 namespace dxmt {
 
@@ -33,6 +36,10 @@ public:
     if (heap)
       device_->UnregisterResidency(heap);
     heap = {};
+#ifdef DXMT_NATIVE
+    if (external_fd >= 0)
+      close(external_fd);
+#endif
   }
 
   HRESULT
@@ -96,6 +103,35 @@ public:
     return S_OK;
   }
 
+#ifdef DXMT_NATIVE
+  HRESULT
+  InitializeExternal(int fd, uint64_t offset, uint64_t size, D3D12_HEAP_TYPE type, D3D12_HEAP_FLAGS flags) {
+    const uint64_t page = (uint64_t)getpagesize();
+    if (fd < 0 || !size || size > (uint64_t(1) << 32) || ((offset | size) & (page - 1)))
+      return E_INVALIDARG;
+
+    /* The app's type and flags are advisory: what placed resources are checked against. A custom heap the guest
+     * maps is CPU-visible memory on this UMA device. */
+    desc_ = {};
+    desc_.SizeInBytes = size;
+    desc_.Properties.Type = type;
+    if (type == D3D12_HEAP_TYPE_CUSTOM) {
+      desc_.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+      desc_.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+    }
+    desc_.Properties.CreationNodeMask = 1;
+    desc_.Properties.VisibleNodeMask = 1;
+    desc_.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    desc_.Flags = flags & ~(D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_ALLOW_DISPLAY);
+
+    external_fd = dup(fd);
+    if (external_fd < 0)
+      return E_OUTOFMEMORY;
+    external_offset = offset;
+    return S_OK;
+  }
+#endif
+
   virtual D3D12_HEAP_DESC *STDMETHODCALLTYPE
   GetDesc(D3D12_HEAP_DESC *__ret) {
     *__ret = desc_;
@@ -116,3 +152,27 @@ CreateHeap(MTLD3D12Device *pDevice, const D3D12_HEAP_DESC *pDesc, REFIID riid, v
 }
 
 }; // namespace dxmt
+
+#ifdef DXMT_NATIVE
+/* directx-native's DXN_SYM_OPEN_EXISTING_HEAP_FROM_FD: [offset, offset + size) of a shared memory fd (borrowed) as
+ * an ID3D12Heap, so buffers placed on it are the embedder's guest's pages: its CPU writes and the GPU see one
+ * allocation. Textures placed on it get memory of their own. */
+extern "C" int32_t
+dxmt_open_existing_heap_from_fd(
+    void *device, int fd, uint64_t offset, uint64_t size, uint32_t heap_type, uint32_t heap_flags, const void *iid,
+    void **ppHeap
+) {
+  using namespace dxmt;
+  InitReturnPtr(ppHeap);
+  if (!device || !iid || !ppHeap)
+    return E_INVALIDARG;
+  Com<ID3D12Device> d3d12_device;
+  if (FAILED(static_cast<IUnknown *>(device)->QueryInterface(IID_PPV_ARGS(&d3d12_device))))
+    return E_INVALIDARG;
+  auto heap = Com(new MTLD3D12HeapImpl(static_cast<MTLD3D12Device *>(d3d12_device.ptr())));
+  HRESULT hr = heap->InitializeExternal(fd, offset, size, (D3D12_HEAP_TYPE)heap_type, (D3D12_HEAP_FLAGS)heap_flags);
+  if (FAILED(hr))
+    return hr;
+  return heap->QueryInterface(*static_cast<const IID *>(iid), ppHeap);
+}
+#endif

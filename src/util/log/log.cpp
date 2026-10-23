@@ -10,6 +10,9 @@
 
 #include <iostream>
 #include <utility>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include "log.hpp"
 
@@ -86,8 +89,10 @@ void Logger::emitMsg(LogLevel level, const std::string &message) {
           std::cerr << adjusted;
       }
 
+      // Flushed per line: an embedder's processes can end without running
+      // destructors, which would lose what is still buffered.
       if (m_fileStream)
-        m_fileStream << adjusted;
+        m_fileStream << adjusted << std::flush;
     }
   }
 }
@@ -106,6 +111,11 @@ std::string Logger::getFileName(const std::string &base) {
     path += '/';
 
   std::string exeName = env::getExeBaseName();
+#ifndef _WIN32
+  // Native: one image serves every process of an embedder, which opens the
+  // log anew (truncating it) in each; give each process a file of its own.
+  exeName += "_" + std::to_string(getpid());
+#endif
   path += exeName + "_" + base;
   return path;
 }

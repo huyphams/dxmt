@@ -20,6 +20,9 @@
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_format.hpp"
+#ifdef DXMT_NATIVE
+#include <unistd.h>
+#endif
 
 namespace dxmt {
 
@@ -51,7 +54,10 @@ public:
       desc_.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
     }
 
-    if (pHeap) {
+    if (pHeap && pHeap->external_fd >= 0) {
+      if (desc_.Width + Offset > pHeap->GetDesc().SizeInBytes)
+        return E_INVALIDARG;
+    } else if (pHeap) {
       auto size_and_align = device_->GetMTLDevice().heapBufferSizeAndAlign(desc_.Width, {});
       if (size_and_align.size + Offset > pHeap->GetDesc().SizeInBytes)
         return E_INVALIDARG;
@@ -60,6 +66,17 @@ public:
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 
     Flags<BufferAllocationFlag> flags;
+#ifdef DXMT_NATIVE
+    if (pHeap && pHeap->external_fd >= 0) {
+      /* An imported heap: its pages in [Offset, Width), mapped whole pages (the heap's size is whole pages too). */
+      UINT64 length = align(desc_.Width, (UINT64)getpagesize());
+      auto allocation =
+          buffer->allocateExternalWindow(pHeap->external_fd, pHeap->external_offset + Offset, length, flags);
+      if (!allocation)
+        return E_OUTOFMEMORY;
+      buffer->rename(std::move(allocation));
+    } else
+#endif
     if (pHeap)
       buffer->rename(buffer->allocate(flags, pHeap->heap, Offset));
     else

@@ -24,6 +24,9 @@
 #include "dxgi_interfaces.h"
 #include "dxmt_format.hpp"
 #include "log/log.hpp"
+#ifndef _WIN32
+#include "d3d12_shared_native.hpp"
+#endif
 #include <map>
 #include "d3d10_1.h"
 #include "d3d11_4.h"
@@ -163,6 +166,98 @@ public:
     return allocator->CreateCommandList(NodeMask, Type, pInitialPipelineState, riid, ppCommandList);
   };
 
+  // What a DXGI format supports, as d3d11's CheckFormatSupport and FORMAT_SUPPORT2 answer it.
+  HRESULT
+  QueryFormatSupport(DXGI_FORMAT Format, D3D12_FORMAT_SUPPORT1 &Support1, D3D12_FORMAT_SUPPORT2 &Support2) {
+    UINT support1 = 0, support2 = 0;
+    Support1 = D3D12_FORMAT_SUPPORT1_NONE;
+    Support2 = D3D12_FORMAT_SUPPORT2_NONE;
+    if (Format == DXGI_FORMAT_UNKNOWN) {
+      Support1 = D3D12_FORMAT_SUPPORT1_BUFFER;
+      return S_OK;
+    }
+    MTL_DXGI_FORMAT_DESC metal_format;
+    if (FAILED(MTLQueryDXGIFormat(GetMTLDevice(), Format, metal_format)))
+      return E_INVALIDARG;
+
+    if (metal_format.PixelFormat) {
+      support1 |= D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
+                  D3D12_FORMAT_SUPPORT1_SHADER_GATHER | D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD |
+                  D3D12_FORMAT_SUPPORT1_TEXTURE1D | D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURE3D |
+                  D3D12_FORMAT_SUPPORT1_TEXTURECUBE | D3D12_FORMAT_SUPPORT1_MIP |
+                  D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
+      if (!(metal_format.Flag & (MTL_DXGI_FORMAT_BC | MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER)))
+        support1 |= D3D12_FORMAT_SUPPORT1_BUFFER;
+      if (metal_format.Flag & MTL_DXGI_FORMAT_BACKBUFFER)
+        support1 |= D3D12_FORMAT_SUPPORT1_DISPLAY;
+    }
+    if (metal_format.AttributeFormat)
+      support1 |= D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER;
+    if (metal_format.PixelFormat == WMTPixelFormatR32Uint || metal_format.PixelFormat == WMTPixelFormatR16Uint)
+      support1 |= D3D12_FORMAT_SUPPORT1_IA_INDEX_BUFFER;
+
+    auto capability = GetMTLPixelFormatCapability(metal_format.PixelFormat);
+    if (any_bit_set(capability & FormatCapability::Color))
+      support1 |= D3D12_FORMAT_SUPPORT1_RENDER_TARGET;
+    if (any_bit_set(capability & FormatCapability::Blend))
+      support1 |= D3D12_FORMAT_SUPPORT1_BLENDABLE;
+    if (any_bit_set(capability & FormatCapability::DepthStencil))
+      support1 |= D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON |
+                  D3D12_FORMAT_SUPPORT1_SHADER_GATHER_COMPARISON;
+    if (any_bit_set(capability & FormatCapability::Resolve))
+      support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RESOLVE;
+    if (any_bit_set(capability & FormatCapability::MSAA))
+      support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET;
+    if (any_bit_set(capability & FormatCapability::Write))
+      support1 |= D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;
+    switch (Format) {
+    case DXGI_FORMAT_R32_FLOAT:
+    case DXGI_FORMAT_R32_UINT:
+    case DXGI_FORMAT_R32_SINT:
+    case DXGI_FORMAT_R32G32_FLOAT:
+    case DXGI_FORMAT_R32G32_UINT:
+    case DXGI_FORMAT_R32G32_SINT:
+    case DXGI_FORMAT_R32G32B32_FLOAT:
+    case DXGI_FORMAT_R32G32B32_UINT:
+    case DXGI_FORMAT_R32G32B32_SINT:
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+    case DXGI_FORMAT_R32G32B32A32_UINT:
+    case DXGI_FORMAT_R32G32B32A32_SINT:
+      support1 |= D3D12_FORMAT_SUPPORT1_SO_BUFFER;
+      break;
+    default:
+      break;
+    }
+
+    if (any_bit_set(capability & FormatCapability::TextureBufferRead))
+      support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
+    if (any_bit_set(capability & FormatCapability::TextureBufferWrite))
+      support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
+    if (any_bit_set(capability & FormatCapability::TextureBufferReadWrite))
+      support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
+    if (any_bit_set(capability & FormatCapability::Atomic))
+      support2 |= D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_ADD | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_BITWISE_OPS |
+                  D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_COMPARE_STORE_OR_COMPARE_EXCHANGE |
+                  D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_EXCHANGE | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_SIGNED_MIN_OR_MAX |
+                  D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_UNSIGNED_MIN_OR_MAX;
+#ifndef DXMT_NO_LOGIC_OP
+    if (any_bit_set(capability & FormatCapability::Blend))
+      support2 |= D3D12_FORMAT_SUPPORT2_OUTPUT_MERGER_LOGIC_OP;
+#endif
+
+    // Emulated BC is sample-only, as in d3d11.
+    if (metal_format.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+      support1 &= D3D12_FORMAT_SUPPORT1_TEXTURE1D | D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURE3D |
+                  D3D12_FORMAT_SUPPORT1_TEXTURECUBE | D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
+                  D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE | D3D12_FORMAT_SUPPORT1_SHADER_GATHER | D3D12_FORMAT_SUPPORT1_MIP |
+                  D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
+      support2 = 0;
+    }
+    Support1 = (D3D12_FORMAT_SUPPORT1)support1;
+    Support2 = (D3D12_FORMAT_SUPPORT2)support2;
+    return S_OK;
+  }
+
   HRESULT STDMETHODCALLTYPE
   CheckFeatureSupport(D3D12_FEATURE Feature, void *pFeatureData, UINT DataSize) {
     auto metal = GetMTLDevice();
@@ -284,7 +379,12 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS *>(pFeatureData);
       out->DoublePrecisionFloatShaderOps = FALSE;
+      // As d3d11 reports it. Windows' own D3D12 runtime refuses a feature level 11_1 driver without logic ops.
+#ifdef DXMT_NO_LOGIC_OP
       out->OutputMergerLogicOp = FALSE;
+#else
+      out->OutputMergerLogicOp = TRUE;
+#endif
       out->MinPrecisionSupport = D3D12_SHADER_MIN_PRECISION_SUPPORT_16_BIT;
       out->TiledResourcesTier = D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED;
       out->ResourceBindingTier = D3D12_RESOURCE_BINDING_TIER_2;
@@ -333,9 +433,12 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS1 *>(pFeatureData);
       out->WaveOps = 0;
-      out->WaveLaneCountMin = 0;
-      out->WaveLaneCountMax = 0;
-      out->TotalLaneCount = 0;
+      // Apple GPUs run 32-wide SIMD groups. Zero lane counts read as an
+      // invalid topology, and the D3D12 runtime then rejects the adapter
+      // when a driver passes them through (Neptune's does).
+      out->WaveLaneCountMin = 32;
+      out->WaveLaneCountMax = 32;
+      out->TotalLaneCount = 32 * 32;
       // If CheckFeatureSupport succeeds this value will always be true.
       out->ExpandedComputeResourceStates = TRUE;
       out->Int64ShaderOps = TRUE;
@@ -355,7 +458,9 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS4 *>(pFeatureData);
       out->MSAA64KBAlignedTextureSupported = TRUE;
-      out->Native16BitShaderOpsSupported = TRUE;
+      // Native 16-bit ops need shader model 6.2, above the 6.0 reported (D3D12_FEATURE_SHADER_MODEL); the runtime
+      // refuses a driver that claims them without it.
+      out->Native16BitShaderOpsSupported = FALSE;
       // TODO(d3d12): revise when d3d12 shared resource is implemented
       out->SharedResourceCompatibilityTier = D3D12_SHARED_RESOURCE_COMPATIBILITY_TIER_0;
       return S_OK;
@@ -387,9 +492,48 @@ public:
         return S_OK;
       }
 
-      // TODO(d3d12): report correct support
-      out->Support1 = (D3D12_FORMAT_SUPPORT1)0xffffffff;
-      out->Support2 = (D3D12_FORMAT_SUPPORT2)0xffffffff;
+      return QueryFormatSupport(out->Format, out->Support1, out->Support2);
+    }
+    // Features Metal has no counterpart for: answered "not supported" rather than failed, as an
+    // embedder (Neptune) forwards every answer, and the runtime refuses an adapter on a failed one.
+    case D3D12_FEATURE_D3D12_OPTIONS5: {
+      if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS5))
+        return E_INVALIDARG;
+      auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS5 *>(pFeatureData);
+      out->SRVOnlyTiledResourceTier3 = FALSE;
+      out->RenderPassesTier = D3D12_RENDER_PASS_TIER_0;
+      out->RaytracingTier = D3D12_RAYTRACING_TIER_NOT_SUPPORTED;
+      return S_OK;
+    }
+    case D3D12_FEATURE_D3D12_OPTIONS6: {
+      if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS6))
+        return E_INVALIDARG;
+      auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS6 *>(pFeatureData);
+      *out = {};
+      out->VariableShadingRateTier = D3D12_VARIABLE_SHADING_RATE_TIER_NOT_SUPPORTED;
+      return S_OK;
+    }
+    case D3D12_FEATURE_D3D12_OPTIONS9: {
+      if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS9))
+        return E_INVALIDARG;
+      auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS9 *>(pFeatureData);
+      *out = {};
+      out->WaveMMATier = D3D12_WAVE_MMA_TIER_NOT_SUPPORTED;
+      return S_OK;
+    }
+    case D3D12_FEATURE_D3D12_OPTIONS11: {
+      if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS11))
+        return E_INVALIDARG;
+      auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS11 *>(pFeatureData);
+      out->AtomicInt64OnDescriptorHeapResourceSupported = FALSE;
+      return S_OK;
+    }
+    case D3D12_FEATURE_COMMAND_QUEUE_PRIORITY: {
+      if (DataSize != sizeof(D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY))
+        return E_INVALIDARG;
+      auto *out = reinterpret_cast<D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY *>(pFeatureData);
+      out->PriorityForTypeIsSupported = out->Priority == D3D12_COMMAND_QUEUE_PRIORITY_NORMAL ||
+                                        out->Priority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
       return S_OK;
     }
     default:
@@ -682,12 +826,35 @@ public:
   CreateSharedHandle(
       ID3D12DeviceChild *object, const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle
   ) {
+#ifndef _WIN32
+    /* Native: a texture created shared vends an NT-style dxn_shared_texture (d3d12_shared_native.hpp). */
+    if (!object || !handle)
+      return E_INVALIDARG;
+    *handle = nullptr;
+    Com<ID3D12Resource> resource;
+    if (FAILED(object->QueryInterface(IID_PPV_ARGS(&resource))))
+      return E_NOTIMPL;
+    auto descriptor = static_cast<MTLD3D12Resource *>(resource.ptr())->SharedDescriptor();
+    if (!descriptor)
+      return E_INVALIDARG;
+    *handle = VendSharedHandle(*(const dxn_shared_texture *)descriptor);
+    return *handle ? S_OK : E_OUTOFMEMORY;
+#else
     return E_NOTIMPL;
+#endif
   };
 
   HRESULT STDMETHODCALLTYPE
   OpenSharedHandle(HANDLE handle, REFIID riid, void **object) {
+#ifndef _WIN32
+    if (object)
+      *object = nullptr;
+    if (dxn_shared_type(handle) == DXN_SHARED_TEXTURE_MAGIC)
+      return OpenSharedTexture(this, handle, riid, object);
+    return E_INVALIDARG;
+#else
     return E_NOTIMPL;
+#endif
   };
 
   HRESULT STDMETHODCALLTYPE

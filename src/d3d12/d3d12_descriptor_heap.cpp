@@ -22,8 +22,87 @@
 #include "com/com_pointer.hpp"
 #include "dxmt_sampler.hpp"
 #include "log/log.hpp"
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
 
 namespace dxmt {
+
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+/* The 32-bit handle space (d3d12_descriptor_heap.hpp) in pages of 64 KiB (2048 descriptors): each page holds the
+ * heap whose range covers it and that range's first page. Page 0 stays empty, so a null handle finds nothing.
+ * Ranges are taken first-fit from a cursor that goes round, so a freed one is the last reused and a stale handle
+ * more likely finds nothing than another heap. Lookups take no lock. */
+constexpr unsigned kHandlePageShift = 16;
+constexpr SIZE_T kHandlePages = SIZE_T(1) << (32 - kHandlePageShift);
+constexpr SIZE_T kHandleIncrement = 32; /* GetDescriptorHandleIncrementSize */
+static std::mutex handle_pages_lock;
+static std::array<std::atomic<void *>, kHandlePages> page_heap;
+static std::array<std::atomic<uint32_t>, kHandlePages> page_first;
+static std::unordered_map<const void *, std::pair<SIZE_T, SIZE_T>> heap_pages; /* first page, page count */
+static SIZE_T page_cursor = 1;
+
+bool
+RegisterDescriptorHeap(const void *heap, UINT NumDescriptors) {
+  SIZE_T pages = std::max<SIZE_T>(
+      1, (NumDescriptors * kHandleIncrement + (SIZE_T(1) << kHandlePageShift) - 1) >> kHandlePageShift
+  );
+  std::lock_guard<std::mutex> lock(handle_pages_lock);
+  SIZE_T page = page_cursor, run = 0;
+  for (SIZE_T step = 0; step < kHandlePages + pages; step++, page++) {
+    if (page == kHandlePages) {
+      page = 1;
+      run = 0;
+    }
+    run = page_heap[page].load(std::memory_order_relaxed) ? 0 : run + 1;
+    if (run < pages)
+      continue;
+    SIZE_T first = page + 1 - pages;
+    for (SIZE_T i = first; i <= page; i++) {
+      page_first[i].store(first, std::memory_order_relaxed);
+      page_heap[i].store(const_cast<void *>(heap), std::memory_order_release);
+    }
+    heap_pages[heap] = {first, pages};
+    page_cursor = page + 1 == kHandlePages ? 1 : page + 1;
+    return true;
+  }
+  ERR("CreateDescriptorHeap: no room for ", NumDescriptors, " more descriptors");
+  return false;
+}
+
+void
+UnregisterDescriptorHeap(const void *heap) {
+  std::lock_guard<std::mutex> lock(handle_pages_lock);
+  auto entry = heap_pages.find(heap);
+  if (entry == heap_pages.end())
+    return;
+  auto [first, pages] = entry->second;
+  for (SIZE_T i = first; i < first + pages; i++)
+    page_heap[i].store(nullptr, std::memory_order_release);
+  heap_pages.erase(entry);
+}
+
+void *
+DescriptorHeapFromHandle(SIZE_T handle, UINT *pIndex) {
+  SIZE_T address = handle & 0xffffffff;
+  SIZE_T page = address >> kHandlePageShift;
+  void *heap = page_heap[page].load(std::memory_order_acquire);
+  SIZE_T base = SIZE_T(page_first[page].load(std::memory_order_relaxed)) << kHandlePageShift;
+  *pIndex = heap ? UINT((address - base) / kHandleIncrement) : 0;
+  return heap;
+}
+
+SIZE_T
+DescriptorHeapHandle(const void *heap, UINT Index) {
+  std::lock_guard<std::mutex> lock(handle_pages_lock);
+  auto entry = heap_pages.find(heap);
+  if (entry == heap_pages.end())
+    return 0;
+  return (entry->second.first << kHandlePageShift) + Index * kHandleIncrement;
+}
+#endif
 
 struct SRVTextureGPUStorage {
   uint64_t resource_id;
@@ -116,10 +195,17 @@ public:
       );
     }
 
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+    if (!RegisterDescriptorHeap(static_cast<MTLD3D12DescriptorHeap *>(this), pDesc->NumDescriptors))
+      return E_OUTOFMEMORY;
+#endif
     return S_OK;
   };
 
   ~MTLD3D12DescriptorHeapImpl() {
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+    UnregisterDescriptorHeap(static_cast<MTLD3D12DescriptorHeap *>(this));
+#endif
     if (buffer_) {
       device_->UnregisterResidencyAndVA(buffer_->current());
     } else {
@@ -380,8 +466,18 @@ public:
     default:
       return E_INVALIDARG;
     }
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+    if (!RegisterDescriptorHeap(static_cast<MTLD3D12RenderTargetDescriptorHeap *>(this), pDesc->NumDescriptors))
+      return E_OUTOFMEMORY;
+#endif
     return S_OK;
   };
+
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+  ~MTLD3D12RenderTargetDescriptorHeapImpl() {
+    UnregisterDescriptorHeap(static_cast<MTLD3D12RenderTargetDescriptorHeap *>(this));
+  }
+#endif
 
   HRESULT
   STDMETHODCALLTYPE
@@ -499,10 +595,17 @@ public:
           reinterpret_cast<SamplerGPUStorage *>(malloc(samplers_.size() * sizeof(SamplerGPUStorage)));
     }
 
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+    if (!RegisterDescriptorHeap(static_cast<MTLD3D12SamplerDescriptorHeap *>(this), pDesc->NumDescriptors))
+      return E_OUTOFMEMORY;
+#endif
     return S_OK;
   };
 
   ~MTLD3D12SamplerDescriptorHeapImpl() {
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+    UnregisterDescriptorHeap(static_cast<MTLD3D12SamplerDescriptorHeap *>(this));
+#endif
      if (buffer_) {
       device_->UnregisterResidencyAndVA(buffer_->current());
     } else {

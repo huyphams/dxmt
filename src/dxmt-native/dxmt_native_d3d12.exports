@@ -6,3 +6,7 @@ _D3D12CreateVersionedRootSignatureDeserializer
 _D3D12SerializeRootSignature
 _D3D12SerializeVersionedRootSignature
 _D3D12GetInterface
+# NT-style shared handles (src/d3d12/d3d12_shared_native.cpp)
+_dxmt_shared_handle_close
+# Heaps imported from shared memory (src/d3d12/d3d12_heap.cpp)
+_dxmt_open_existing_heap_from_fd

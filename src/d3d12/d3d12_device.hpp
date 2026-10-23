@@ -44,6 +44,10 @@ class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList2 {
 public:
   EncoderData *entry;
   size_t encoder_count;
+
+  /* A bundle's recorded calls, made on the list that executes it (ExecuteBundle); nothing for other lists. */
+  virtual void
+  Replay(ID3D12GraphicsCommandList *pTarget) {}
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
@@ -81,11 +85,21 @@ public:
       UINT *TotalTileCount, D3D12_PACKED_MIP_INFO *PackedMipInfo, D3D12_TILE_SHAPE *StandardTileShape,
       UINT *SubresourceTilingCount, UINT FirstSubresourceTiling, D3D12_SUBRESOURCE_TILING *SubresourceTilings
   ) = 0;
+
+  /* Native: the dxn_shared_texture of a texture created shared (D3D12_HEAP_FLAG_SHARED), or null. */
+  virtual const void *
+  SharedDescriptor() {
+    return nullptr;
+  }
 };
 
 class MTLD3D12Heap : public ID3D12Heap {
 public:
   WMT::Reference<WMT::Heap> heap;
+  /* A heap imported from an embedder's shared memory (dxmt_open_existing_heap_from_fd) has no Metal heap: its
+   * placed buffers map their own range of [external_offset, + SizeInBytes) of this fd. -1 otherwise. */
+  int external_fd = -1;
+  uint64_t external_offset = 0;
 };
 
 class MTLD3D12Fence : public ID3D12Fence1 {
@@ -219,6 +233,9 @@ HRESULT CreateCommittedTexture(
     REFIID riid, void **ppResource
 );
 
+/* Native: a texture over another process's dxn_shared_texture (ID3D12Device::OpenSharedHandle). */
+HRESULT OpenSharedTexture(MTLD3D12Device *pDevice, const void *pDescriptor, REFIID riid, void **ppResource);
+
 HRESULT
 CreatePlacedTexture(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC *pDesc,
@@ -278,66 +295,36 @@ void PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_S
 
 inline std::tuple<MTLD3D12RenderTargetDescriptorHeap *, UINT>
 GetRenderTargetHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   return {impl.extract<MTLD3D12RenderTargetDescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetRenderTargetDescriptor(MTLD3D12RenderTargetDescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline std::tuple<MTLD3D12DescriptorHeap *, UINT>
 GetShaderVisibleDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   return {impl.extract<MTLD3D12DescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetShaderVisibleDescriptor(MTLD3D12DescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
   //
 }
 
 inline std::tuple<MTLD3D12SamplerDescriptorHeap *, UINT>
 GetSamplerDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   return {impl.extract<MTLD3D12SamplerDescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetSamplerDescriptor(MTLD3D12SamplerDescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 template <typename VIEW_DESC>

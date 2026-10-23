@@ -75,8 +75,9 @@ struct BufferViewDescriptor {
 class Buffer;
 
 /* Guest-shared backing of an external BufferAllocation: a dup of the
- * embedder's fd and this process's mapping of it.  Released after the
- * MTLBuffer over it, so the pages outlive every GPU reference. */
+ * embedder's fd (or -1 for a window, whose mapping alone keeps the pages)
+ * and this process's mapping of it.  Released after the MTLBuffer over it,
+ * so the pages outlive every GPU reference. */
 struct ExternalBufferBacking {
   int fd = -1;
   void *mapping = nullptr;
@@ -214,6 +215,9 @@ public:
    * backing_length must cover the buffer and be page aligned.  Empty on
    * failure, and for CpuInvisible flags, which have no CPU storage to share. */
   Rc<BufferAllocation> allocateExternal(int fd, uint64_t backing_length, Flags<BufferAllocationFlag> flags, uint32_t cookie);
+  /* The same over [offset, offset + length) of an fd the caller keeps (a D3D12
+   * heap imported from shared memory): offset and length page aligned. */
+  Rc<BufferAllocation> allocateExternalWindow(int fd, uint64_t offset, uint64_t length, Flags<BufferAllocationFlag> flags);
 
   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);
 
@@ -238,6 +242,9 @@ public:
   }
 
 private:
+  Rc<BufferAllocation> wrapExternal(int owned_fd, void *mapping, uint64_t length, Flags<BufferAllocationFlag> flags,
+                                    uint32_t cookie);
+
   void prepareAllocationViews(BufferAllocation *allocation);
 
   uint64_t length_;

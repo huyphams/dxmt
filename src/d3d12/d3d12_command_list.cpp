@@ -16,6 +16,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <functional>
 #include "d3d12_command_allocator.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_format.hpp"
@@ -1279,7 +1280,11 @@ public:
     // optimization hints later)
   };
 
-  void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE
+  ExecuteBundle(ID3D12GraphicsCommandList *CommandList) {
+    if (CommandList)
+      static_cast<MTLD3D12GraphicsCommandList *>(CommandList)->Replay(this);
+  };
 
   void STDMETHODCALLTYPE SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) {
     // no need to do anything here because because we encode the full descriptor table address in root argument
@@ -1463,7 +1468,12 @@ public:
   };
 
   void STDMETHODCALLTYPE SOSetTargets(UINT StartSlot, UINT Count, const D3D12_STREAM_OUTPUT_BUFFER_VIEW *Views) {
-    IMPLEMENT_ME
+    // Unbinding is what a list's state reset does (an embedder replays it): nothing to do without stream output.
+    bool binds = false;
+    for (UINT i = 0; Views && i < Count; i++)
+      binds |= Views[i].BufferLocation != 0;
+    if (binds)
+      ERR("SOSetTargets: stream output isn't supported; targets ignored");
   };
 
   void STDMETHODCALLTYPE
@@ -1695,14 +1705,17 @@ public:
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {
-    IMPLEMENT_ME
+    // No buffer turns predication off, which a list's state reset does (an embedder replays it).
+    if (pBuffer)
+      ERR("SetPredication: predication isn't supported; draws aren't skipped");
   };
 
-  void STDMETHODCALLTYPE SetMarker(UINT Metadata, const void *data, UINT size) { IMPLEMENT_ME };
+  // Debugger markers (PIX): they draw nothing, and apps set them freely.
+  void STDMETHODCALLTYPE SetMarker(UINT Metadata, const void *data, UINT size) {};
 
-  void STDMETHODCALLTYPE BeginEvent(UINT Metadata, const void *data, UINT size) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE BeginEvent(UINT Metadata, const void *data, UINT size) {};
 
-  void STDMETHODCALLTYPE EndEvent() { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE EndEvent() {};
 
   void STDMETHODCALLTYPE ExecuteIndirect(
       ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer,
@@ -1790,7 +1803,9 @@ public:
 
   void STDMETHODCALLTYPE
   SetSamplePositions(UINT NumSamplesPerPixel, UINT NumPixels, D3D12_SAMPLE_POSITION *pSamplePositions) {
-    IMPLEMENT_ME
+    // None restores the standard positions, which are the only ones used.
+    if (NumSamplesPerPixel && pSamplePositions)
+      ERR("SetSamplePositions: programmable sample positions aren't supported; ignored");
   }
 
   void STDMETHODCALLTYPE
@@ -1803,7 +1818,9 @@ public:
 
   void STDMETHODCALLTYPE
   SetViewInstanceMask(UINT Mask) {
-    IMPLEMENT_ME
+    // View instancing is reported as not supported (tier 0): only the first view exists.
+    if (Mask > 1)
+      ERR("SetViewInstanceMask: view instancing isn't supported; mask ", Mask, " ignored");
   }
 
   void STDMETHODCALLTYPE
@@ -1836,6 +1853,205 @@ public:
   }
 };
 
+/* A bundle: the calls a bundle may make, recorded with copies of their arguments, which ExecuteBundle makes on the
+ * list that executes it, so the state they set stays set there, as D3D12 has it. Calls a bundle may not make are
+ * the debug layer's to refuse; they're dropped. */
+class MTLD3D12BundleCommandList final : public MTLD3D12GraphicsCommandListImpl {
+  using Command = std::function<void(ID3D12GraphicsCommandList *)>;
+  std::vector<Command> commands_;
+  bool closed_ = false;
+
+  void
+  Record(Command &&command) {
+    if (!closed_)
+      commands_.push_back(std::move(command));
+  }
+
+public:
+  MTLD3D12BundleCommandList(MTLD3D12Device *pDevice) : MTLD3D12GraphicsCommandListImpl(pDevice) {}
+
+  HRESULT
+  InitializeBundle(ID3D12PipelineState *pInitialState) {
+    commands_.clear();
+    closed_ = false;
+    if (pInitialState)
+      SetPipelineState(pInitialState);
+    return S_OK;
+  }
+
+  void
+  Replay(ID3D12GraphicsCommandList *pTarget) override {
+    for (auto &command : commands_)
+      command(pTarget);
+  }
+
+  D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE
+  GetType() override {
+    return D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  Close() override {
+    if (closed_)
+      return E_FAIL;
+    closed_ = true;
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  Reset(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialState) override {
+    if (!closed_)
+      return E_FAIL;
+    return InitializeBundle(pInitialState);
+  }
+
+  void STDMETHODCALLTYPE
+  ClearState(ID3D12PipelineState *pPipelineState) override {}
+
+  void STDMETHODCALLTYPE
+  DrawInstanced(UINT VertexCount, UINT InstanceCount, UINT StartVertex, UINT StartInstance) override {
+    Record([=](auto list) { list->DrawInstanced(VertexCount, InstanceCount, StartVertex, StartInstance); });
+  }
+
+  void STDMETHODCALLTYPE
+  DrawIndexedInstanced(UINT IndexCount, UINT InstanceCount, UINT StartIndex, INT BaseVertex, UINT StartInstance)
+      override {
+    Record([=](auto list) { list->DrawIndexedInstanced(IndexCount, InstanceCount, StartIndex, BaseVertex, StartInstance); });
+  }
+
+  void STDMETHODCALLTYPE
+  Dispatch(UINT X, UINT Y, UINT Z) override {
+    Record([=](auto list) { list->Dispatch(X, Y, Z); });
+  }
+
+  void STDMETHODCALLTYPE
+  IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY Topology) override {
+    Record([=](auto list) { list->IASetPrimitiveTopology(Topology); });
+  }
+
+  void STDMETHODCALLTYPE
+  IASetVertexBuffers(UINT StartSlot, UINT NumViews, const D3D12_VERTEX_BUFFER_VIEW *pViews) override {
+    std::vector<D3D12_VERTEX_BUFFER_VIEW> views(pViews ? pViews : nullptr, pViews ? pViews + NumViews : nullptr);
+    Record([=](auto list) { list->IASetVertexBuffers(StartSlot, NumViews, views.empty() ? nullptr : views.data()); });
+  }
+
+  void STDMETHODCALLTYPE
+  IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW *pView) override {
+    bool has_view = pView;
+    D3D12_INDEX_BUFFER_VIEW view = pView ? *pView : D3D12_INDEX_BUFFER_VIEW{};
+    Record([=](auto list) { list->IASetIndexBuffer(has_view ? &view : nullptr); });
+  }
+
+  void STDMETHODCALLTYPE
+  OMSetBlendFactor(const FLOAT BlendFactor[4]) override {
+    std::array<FLOAT, 4> factor = {1.0f, 1.0f, 1.0f, 1.0f};
+    if (BlendFactor)
+      std::copy(BlendFactor, BlendFactor + 4, factor.begin());
+    Record([=](auto list) { list->OMSetBlendFactor(factor.data()); });
+  }
+
+  void STDMETHODCALLTYPE
+  OMSetStencilRef(UINT StencilRef) override {
+    Record([=](auto list) { list->OMSetStencilRef(StencilRef); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetPipelineState(ID3D12PipelineState *pPipelineState) override {
+    Com<ID3D12PipelineState> pso = pPipelineState;
+    Record([=](auto list) { list->SetPipelineState(pso.ptr()); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetGraphicsRootSignature(ID3D12RootSignature *pRootSignature) override {
+    Com<ID3D12RootSignature> signature = pRootSignature;
+    Record([=](auto list) { list->SetGraphicsRootSignature(signature.ptr()); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetComputeRootSignature(ID3D12RootSignature *pRootSignature) override {
+    Com<ID3D12RootSignature> signature = pRootSignature;
+    Record([=](auto list) { list->SetComputeRootSignature(signature.ptr()); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetGraphicsRoot32BitConstant(UINT Index, UINT Data, UINT Offset) override {
+    Record([=](auto list) { list->SetGraphicsRoot32BitConstant(Index, Data, Offset); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetComputeRoot32BitConstant(UINT Index, UINT Data, UINT Offset) override {
+    Record([=](auto list) { list->SetComputeRoot32BitConstant(Index, Data, Offset); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetGraphicsRoot32BitConstants(UINT Index, UINT Count, const void *pData, UINT Offset) override {
+    std::vector<UINT> data((const UINT *)pData, (const UINT *)pData + (pData ? Count : 0));
+    Record([=](auto list) { list->SetGraphicsRoot32BitConstants(Index, Count, data.data(), Offset); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetComputeRoot32BitConstants(UINT Index, UINT Count, const void *pData, UINT Offset) override {
+    std::vector<UINT> data((const UINT *)pData, (const UINT *)pData + (pData ? Count : 0));
+    Record([=](auto list) { list->SetComputeRoot32BitConstants(Index, Count, data.data(), Offset); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetGraphicsRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE Base) override {
+    Record([=](auto list) { list->SetGraphicsRootDescriptorTable(Index, Base); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetComputeRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE Base) override {
+    Record([=](auto list) { list->SetComputeRootDescriptorTable(Index, Base); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetGraphicsRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS Address) override {
+    Record([=](auto list) { list->SetGraphicsRootConstantBufferView(Index, Address); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetComputeRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS Address) override {
+    Record([=](auto list) { list->SetComputeRootConstantBufferView(Index, Address); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetGraphicsRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS Address) override {
+    Record([=](auto list) { list->SetGraphicsRootShaderResourceView(Index, Address); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetComputeRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS Address) override {
+    Record([=](auto list) { list->SetComputeRootShaderResourceView(Index, Address); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetGraphicsRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS Address) override {
+    Record([=](auto list) { list->SetGraphicsRootUnorderedAccessView(Index, Address); });
+  }
+
+  void STDMETHODCALLTYPE
+  SetComputeRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS Address) override {
+    Record([=](auto list) { list->SetComputeRootUnorderedAccessView(Index, Address); });
+  }
+
+  void STDMETHODCALLTYPE
+  ExecuteIndirect(
+      ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer, UINT64 ArgOffset,
+      ID3D12Resource *pCountBuffer, UINT64 CountOffset
+  ) override {
+    Com<ID3D12CommandSignature> signature = pCommandSignature;
+    Com<ID3D12Resource> arguments = pArgBuffer, count = pCountBuffer;
+    Record([=](auto list) {
+      list->ExecuteIndirect(signature.ptr(), MaxCommandCount, arguments.ptr(), ArgOffset, count.ptr(), CountOffset);
+    });
+  }
+
+  /* A bundle's descriptor heaps must be the executing list's: nothing to replay. */
+  void STDMETHODCALLTYPE
+  SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) override {}
+};
+
 HRESULT STDMETHODCALLTYPE
 MTLD3D12CommandAllocatorImpl::CreateCommandList(
     UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,
@@ -1843,6 +2059,14 @@ MTLD3D12CommandAllocatorImpl::CreateCommandList(
 ) {
   if (Type != type_)
     return E_INVALIDARG;
+
+  if (Type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+    auto bundle = Com(new MTLD3D12BundleCommandList(device_));
+    HRESULT hr = bundle->InitializeBundle(pInitialPipelineState);
+    if (FAILED(hr))
+      return hr;
+    return bundle->QueryInterface(riid, ppCommandList);
+  }
 
   auto cmd_list = Com(new MTLD3D12GraphicsCommandListImpl(device_));
   HRESULT hr = cmd_list->Initialize(this, pInitialPipelineState);

@@ -22,17 +22,43 @@
 #include "dxmt_texture.hpp"
 #include <cstdint>
 
-#if UINTPTR_MAX == 0xffffffffffffffffULL
+/* Native builds take the table below too: an embedder's 32-bit guests hold CPU descriptor handles in 32 bits. */
+#if UINTPTR_MAX == 0xffffffffffffffffULL && !defined(DXMT_NATIVE)
 #define DXMT_USE_EMBEDDED_HEAP_POINTER
 #endif
 
 namespace dxmt {
 
+#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
+/* 32-bit CPU descriptor handles: each heap takes its own range of a process-wide 32-bit handle space, so handles of
+ * different heaps never overlap (embedders and layers sort heaps by handle) and a handle cut to 32 bits still finds
+ * its heap. Bits above 32 are ignored. */
+bool RegisterDescriptorHeap(const void *heap, UINT NumDescriptors);
+void UnregisterDescriptorHeap(const void *heap);
+void *DescriptorHeapFromHandle(SIZE_T handle, UINT *pIndex);
+SIZE_T DescriptorHeapHandle(const void *heap, UINT Index);
+#endif
+
 struct EMBEDDED_DESCRIPTOR_HANDLE {
 #ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 7;
+  void *Heap;
+  UINT Descriptor;
+
+  template <typename T>
+  T *
+  extract() {
+    return reinterpret_cast<T *>(Heap);
+  }
+
+  EMBEDDED_DESCRIPTOR_HANDLE(const void *heap, UINT index) : Heap(const_cast<void *>(heap)), Descriptor(index) {}
+
+  EMBEDDED_DESCRIPTOR_HANDLE(D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
+    Heap = DescriptorHeapFromHandle(Handle.ptr, &Descriptor);
+  }
+
+  operator D3D12_CPU_DESCRIPTOR_HANDLE() const {
+    return {DescriptorHeapHandle(Heap, Descriptor)};
+  }
 #else
   SIZE_T Tag        : 5;
   SIZE_T Descriptor : 20;
@@ -50,7 +76,6 @@ struct EMBEDDED_DESCRIPTOR_HANDLE {
     Tag = (SIZE_T)heap >> 3;
     Descriptor = index;
   }
-#endif
 
   EMBEDDED_DESCRIPTOR_HANDLE(D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
     union {
@@ -69,11 +94,14 @@ struct EMBEDDED_DESCRIPTOR_HANDLE {
     _.impl = *this;
     return _.d3d12;
   };
+#endif
 
   EMBEDDED_DESCRIPTOR_HANDLE() = default;
 };
 
+#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
 static_assert(sizeof(EMBEDDED_DESCRIPTOR_HANDLE) == sizeof(D3D12_CPU_DESCRIPTOR_HANDLE));
+#endif
 
 enum class ShaderVisibleDescriptorType {
   Null,

@@ -20,6 +20,10 @@
 #include "d3d12_pageable.hpp"
 #include "dxmt_format.hpp"
 #include "com/com_pointer.hpp"
+#ifndef _WIN32
+#include "d3d12_shared_native.hpp"
+#include <unistd.h>
+#endif
 
 namespace dxmt {
 
@@ -174,6 +178,10 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_RESOURCE_DESC desc_;
   D3D12_HEAP_PROPERTIES heap_props_;
   D3D12_HEAP_FLAGS heap_flags_;
+#ifndef _WIN32
+  /* A shared texture's descriptor (d3d12_shared_native.hpp), owning its fd. */
+  dxn_shared_texture shared_pod_ = {};
+#endif
 
 public:
   MTLD3D12Texture(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Resource>(pDevice) {}
@@ -217,6 +225,21 @@ public:
         return E_INVALIDARG;
     }
 
+#ifndef _WIN32
+    /* Shared: a linear texture over shared memory, which CreateSharedHandle can give another process. */
+    if (!pHeap && (HeapFlags & D3D12_HEAP_FLAG_SHARED)) {
+      if (IsShareableTexture(device_->GetMTLDevice(), desc_)) {
+        hr = AllocateShmTexture(device_->GetMTLDevice(), desc_, texture_info, nullptr, texture, shared_pod_);
+        if (FAILED(hr))
+          return hr;
+        device_->RegisterResidency(texture->current()->texture());
+        return S_OK;
+      }
+      WARN("D3D12Texture: can't share a texture of format ", desc_.Format, " with ", desc_.MipLevels, " mips and ",
+           desc_.DepthOrArraySize, " layers");
+    }
+#endif
+
     texture = new Texture(texture_info, device_->GetMTLDevice());
     Flags<TextureAllocationFlag> flags = {};
     if (pHeap) {
@@ -229,9 +252,40 @@ public:
     return S_OK;
   };
 
+#ifndef _WIN32
+  /* A texture another process shared (OpenSharedHandle): its descriptor's surface, mapped. */
+  HRESULT
+  InitializeShared(const dxn_shared_texture &pod) {
+    HRESULT hr = DescFromSharedTexture(pod, desc_);
+    if (FAILED(hr))
+      return hr;
+    heap_props_ = {D3D12_HEAP_TYPE_DEFAULT};
+    heap_flags_ = D3D12_HEAP_FLAG_SHARED;
+    WMTTextureInfo texture_info;
+    hr = PopulateWMTTextureInfo(device_->GetMTLDevice(), texture_info, desc_);
+    if (FAILED(hr))
+      return hr;
+    desc_.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    hr = AllocateShmTexture(device_->GetMTLDevice(), desc_, texture_info, &pod, texture, shared_pod_);
+    if (FAILED(hr))
+      return hr;
+    device_->RegisterResidency(texture->current()->texture());
+    return S_OK;
+  }
+
+  const void *
+  SharedDescriptor() override {
+    return shared_pod_.magic == DXN_SHARED_TEXTURE_MAGIC ? &shared_pod_ : nullptr;
+  }
+#endif
+
   ~MTLD3D12Texture() {
     if (texture && texture->current() && !texture->current()->flags().test(TextureAllocationFlag::AllocatedOnHeap))
       device_->UnregisterResidency(texture->current()->texture());
+#ifndef _WIN32
+    if (shared_pod_.magic == DXN_SHARED_TEXTURE_MAGIC && shared_pod_.fd >= 0)
+      close(shared_pod_.fd);
+#endif
   }
 
   HRESULT
@@ -859,6 +913,22 @@ CreateCommittedTexture(
   return texture->QueryInterface(riid, ppResource);
 }
 
+#ifndef _WIN32
+HRESULT
+OpenSharedTexture(MTLD3D12Device *pDevice, const void *pDescriptor, REFIID riid, void **ppResource) {
+  auto pod = (const dxn_shared_texture *)pDescriptor;
+  if (!dxn_shared_check(pod, DXN_SHARED_TEXTURE_MAGIC, sizeof(*pod)))
+    return E_INVALIDARG;
+  auto texture = Com(new MTLD3D12Texture(pDevice));
+  HRESULT hr = texture->InitializeShared(*pod);
+  if (FAILED(hr))
+    return hr;
+  if (!ppResource)
+    return S_FALSE;
+  return texture->QueryInterface(riid, ppResource);
+}
+#endif
+
 HRESULT
 CreatePlacedTexture(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC *pDesc,
@@ -873,6 +943,14 @@ CreatePlacedTexture(
   } else {
     if (heap_desc.Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES)
       return E_INVALIDARG;
+  }
+
+  /* A heap imported from shared memory has no Metal heap to place a texture on. The CPU reaches a texture there only
+   * through Write/ReadFromSubresource, so it gets memory of its own; only aliasing with the heap's buffers is lost. */
+  if (pHeap->external_fd >= 0) {
+    WARN("CreatePlacedResource: texture on a heap imported from shared memory gets memory of its own");
+    pHeap = nullptr;
+    HeapOffset = 0;
   }
 
   HRESULT hr = texture->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, InitialState, pHeap, HeapOffset);
