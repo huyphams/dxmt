@@ -22,6 +22,7 @@
 #include "d3d12_pageable.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include "util_win32_compat.h"
 #include "util_env.hpp"
 #include <atomic>
 #include "d3d10_1.h"

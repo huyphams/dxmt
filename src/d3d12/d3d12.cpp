@@ -80,6 +80,8 @@ D3D12GetDebugInterface(REFIID iid, void **debug) {
   return E_NOINTERFACE;
 }
 
+#ifdef _WIN32
+
 BOOL WINAPI
 DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   if (reason != DLL_PROCESS_ATTACH)
@@ -88,5 +90,7 @@ DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   DisableThreadLibraryCalls(instance);
   return TRUE;
 }
+
+#endif
 
 } // namespace dxmt

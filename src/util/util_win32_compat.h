@@ -3,6 +3,7 @@
 #ifndef _WIN32
 
 #include <windows.h>
+#include <directx-native/dxn_event.h>
 
 #include "log/log.hpp"
 
@@ -80,6 +81,15 @@ inline BOOL ReleaseSemaphore(HANDLE hSemaphore,
                              LPLONG lpPreviousCount) {
   dxmt::Logger::warn("ReleaseSemaphore not implemented.");
   return FALSE;
+}
+
+/* Native: event HANDLEs are directx-native's events (dxn_event.h), which the
+ * embedder creates and hands to SetEventOnCompletion. */
+inline BOOL SetEvent(HANDLE hEvent) {
+  if (!hEvent || !dxn_event_is_event(hEvent))
+    return FALSE;
+  dxn_event_signal(hEvent);
+  return TRUE;
 }
 
 inline BOOL CloseHandle(HANDLE hObject) {

@@ -20,6 +20,7 @@
 #include "d3d12_device_child.hpp"
 #include "com/com_pointer.hpp"
 #include "log/log.hpp"
+#include "util_win32_compat.h"
 
 namespace dxmt {
 

@@ -24,6 +24,7 @@
 #include "dxmt_info.hpp"
 #include "com/com_pointer.hpp"
 #include "log/log.hpp"
+#include "util_win32_compat.h"
 #include "wsi_window.hpp"
 #include "util_hotpatch.h"
 #include "config/config.hpp"
@@ -41,7 +42,7 @@ TODO: some implementations can be shared with d3d11 swapchain
 
 namespace dxmt {
 
-WMTPixelFormat
+static WMTPixelFormat
 ConvertSwapChainFormat(DXGI_FORMAT format) {
   switch (format) {
   case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
@@ -59,7 +60,7 @@ ConvertSwapChainFormat(DXGI_FORMAT format) {
   }
 }
 
-WMTColorSpace
+static WMTColorSpace
 ConvertColorSpace(DXGI_COLOR_SPACE_TYPE color_space, bool hdr) {
   switch (color_space) {
   case DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709:
@@ -78,7 +79,7 @@ ConvertColorSpace(DXGI_COLOR_SPACE_TYPE color_space, bool hdr) {
 /**
  FIXME: duplicated implementation in dxgi_output.cpp
 */
-uint32_t
+static uint32_t
 GetMonitorFormatBpp(DXGI_FORMAT Format) {
   switch (Format) {
   case DXGI_FORMAT_R8G8B8A8_UNORM:

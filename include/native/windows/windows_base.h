@@ -388,12 +388,12 @@ typedef struct RGNDATA {
 # define DEFINE_ENUM_FLAG_OPERATORS(type) \
 extern "C++" \
 { \
-    inline type operator &(type x, type y) { return (type)((int)x & (int)y); } \
+    constexpr inline type operator &(type x, type y) { return (type)((int)x & (int)y); } \
     inline type operator &=(type &x, type y) { return (type &)((int &)x &= (int)y); } \
-    inline type operator ~(type x) { return (type)~(int)x; } \
-    inline type operator |(type x, type y) { return (type)((int)x | (int)y); } \
+    constexpr inline type operator ~(type x) { return (type)~(int)x; } \
+    constexpr inline type operator |(type x, type y) { return (type)((int)x | (int)y); } \
     inline type operator |=(type &x, type y) { return (type &)((int &)x |= (int)y); } \
-    inline type operator ^(type x, type y) { return (type)((int)x ^ (int)y); } \
+    constexpr inline type operator ^(type x, type y) { return (type)((int)x ^ (int)y); } \
     inline type operator ^=(type &x, type y) { return (type &)((int &)x ^= (int)y); } \
 }
 #else

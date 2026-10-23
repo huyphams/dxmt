@@ -23,6 +23,7 @@ dxmt_include_dirs = [
 
 dxmt_native_include_dirs = [
   './include/native/windows',
+  './include/native/d3d12',
   './include/native/directx',
 ]
 
@@ -231,6 +232,9 @@ else
   # single image that would be several definitions of one symbol, so the
   # modules drop theirs and dxmt-native defines the only one.
   add_project_arguments('-DDXMT_NATIVE=1', language : ['c', 'cpp'])
+  # Methods that return a structure take a pointer to it, as on Windows
+  # (include/native/d3d12/README.md).
+  add_project_arguments('-DWIDL_EXPLICIT_AGGREGATE_RETURNS', language : ['c', 'cpp'])
   # App Store validation rejects any image that imports a private symbol
   add_project_arguments('-DDXMT_NO_PRIVATE_SYMBOLS=1', language : ['c', 'cpp'])
 endif

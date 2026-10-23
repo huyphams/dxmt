@@ -21,7 +21,7 @@
 #include "com/com_object.hpp"
 #include "com/com_private_data.hpp"
 
-#if defined(__MINGW32__)
+#if defined(__MINGW32__) || !defined(_WIN32)
 
 const GUID kWKPDID_D3DDebugObjectNameW = {0x4cca5fd8, 0x921f, 0x42c8, 0x85, 0x66, 0x70, 0xca, 0xf2, 0xa9, 0xb7, 0x41};
 
