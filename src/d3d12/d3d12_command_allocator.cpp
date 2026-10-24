@@ -313,6 +313,14 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     cmd_draw_res.base_instance = 0;
     cmd_draw_res.instance_count = 1;
 
+    // The resolver's vertex stage writes the commands in this same render pass: without a barrier the draws that run
+    // them could start first, and drew with the last state the buffer's memory held, or nothing.
+    auto &cmd_barrier = EncodeRenderCommand<wmtcmd_render_memory_barrier>();
+    cmd_barrier.type = WMTRenderCommandMemoryBarrier;
+    cmd_barrier.scope = WMTBarrierScopeBuffers;
+    cmd_barrier.stages_before = WMTRenderStagePreRaster;
+    cmd_barrier.stages_after = WMTRenderStageVertex;
+
     auto &cmd_setpso = EncodeRenderCommand<wmtcmd_render_setpso>();
     cmd_setpso.type = WMTRenderCommandSetPSO;
     cmd_setpso.pso = pPSO->GetRenderPipelineVariant({} /* FIXME: value should not matter here until gs/ts */);

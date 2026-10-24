@@ -391,7 +391,10 @@ public:
 #endif
       out->MinPrecisionSupport = D3D12_SHADER_MIN_PRECISION_SUPPORT_16_BIT;
       out->TiledResourcesTier = D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED;
-      out->ResourceBindingTier = D3D12_RESOURCE_BINDING_TIER_2;
+      // Tier 3: descriptor tables of any size for every kind, CBVs and UAVs too, and entries a shader doesn't reach
+      // left unwritten. Tables are heap addresses and shaders index them (dxbc_binding_rootsig.cpp), with no count
+      // per stage. Mesa's OpenGL on Direct3D 12 gives a stage 14 uniform blocks, OpenGL 4.3's minimum, only here.
+      out->ResourceBindingTier = D3D12_RESOURCE_BINDING_TIER_3;
       out->PSSpecifiedStencilRefSupported = TRUE;
       out->TypedUAVLoadAdditionalFormats = TRUE;
       out->ROVsSupported = TRUE;
@@ -797,27 +800,42 @@ public:
       return E_INVALIDARG;
     auto d3d12heap = static_cast<MTLD3D12Heap *>(pHeap);
     auto heap_desc = d3d12heap->GetDesc();
+    /* Changed for VMPal, 2026-10-24: a refusal says what it refused, as the runtime passed the call already and the
+     * app (Dawn: "CreatePlacedResource failed with E_INVALIDARG") can't. */
+    auto refuse = [&](HRESULT hr, const char *why) {
+      WARN(
+          "CreatePlacedResource: ", why, " (0x", std::hex, (uint32_t)hr, std::dec, "): dimension ", pDesc->Dimension,
+          ", ", pDesc->Width, "x", pDesc->Height, "x", pDesc->DepthOrArraySize, ", mips ", pDesc->MipLevels,
+          ", format ", pDesc->Format, ", samples ", pDesc->SampleDesc.Count, ", layout ", pDesc->Layout, ", flags 0x",
+          std::hex, pDesc->Flags, ", state 0x", InitialState, ", heap type ", std::dec, heap_desc.Properties.Type,
+          " cpu ", heap_desc.Properties.CPUPageProperty, " pool ", heap_desc.Properties.MemoryPoolPreference,
+          " flags 0x", std::hex, heap_desc.Flags, std::dec, ", offset ", Offset, " of ", heap_desc.SizeInBytes
+      );
+      return hr;
+    };
     HRESULT hr = S_OK;
     hr = ValidateHeapProperties(&heap_desc.Properties, heap_desc.Flags, advertise_numa_);
     if (FAILED(hr))
-      return hr;
+      return refuse(hr, "heap properties");
     hr = ValidateResourceDescs(pDesc, &heap_desc.Properties);
     if (FAILED(hr))
-      return hr;
+      return refuse(hr, "resource for the heap");
     hr = ValidateResourceStates(InitialState, &heap_desc.Properties);
     if (FAILED(hr))
-      return hr;
+      return refuse(hr, "initial state for the heap");
     switch (pDesc->Dimension) {
     case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
     case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
     case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
-      return CreatePlacedTexture(this, d3d12heap, Offset, pDesc, InitialState, OptimizedClearValue, riid, ppResource);
+      hr = CreatePlacedTexture(this, d3d12heap, Offset, pDesc, InitialState, OptimizedClearValue, riid, ppResource);
+      return FAILED(hr) ? refuse(hr, "texture") : hr;
     case D3D12_RESOURCE_DIMENSION_BUFFER:
-      return CreatePlacedBuffer(this, d3d12heap, Offset, pDesc, InitialState, OptimizedClearValue, riid, ppResource);
+      hr = CreatePlacedBuffer(this, d3d12heap, Offset, pDesc, InitialState, OptimizedClearValue, riid, ppResource);
+      return FAILED(hr) ? refuse(hr, "buffer") : hr;
     default:
       break;
     }
-    return E_INVALIDARG;
+    return refuse(E_INVALIDARG, "dimension");
   };
 
   HRESULT STDMETHODCALLTYPE

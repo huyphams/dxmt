@@ -2525,8 +2525,9 @@ Converter::EmitDiscard(const CallInst &Call) {
   auto Cond = Get(Call.getArgOperand(1));
   if (!Cond)
     return Cond.takeError();
-  if (Call.getNextNonDebugInstruction() && !Call.getNextNonDebugInstruction()->isTerminator())
-    return unsupported("dxil: discard is not the last instruction in a basic block");
+  /* Changed for VMPal, 2026-10-24: anywhere in a block, as D3D9On12's alpha test and texkill put it. The rest of the
+   * block goes on in ContinueBB, as DXBC's discard goes on, and its terminator's successors take their PHIs' values
+   * from the block it ends in (TranslateTerminator). */
   auto *DiscardBB = llvm::BasicBlock::Create(air.getContext(), "discard", ctx.function);
   auto *ContinueBB = llvm::BasicBlock::Create(air.getContext(), "continue", ctx.function);
   ir.CreateCondBr(*Cond, DiscardBB, ContinueBB);

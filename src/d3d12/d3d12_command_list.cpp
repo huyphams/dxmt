@@ -1764,6 +1764,35 @@ public:
       IMPLEMENT_ME // TODO: (potential) emulated pipeline
     }
 
+    // Draws alone (the signature sets no root arguments, vertex or index buffers) and no count buffer, as Unity's VFX
+    // Graph draws: Metal's own indirect draws read D3D12's arguments as they're laid out, one draw per command, with
+    // no indirect command buffer to make and fill on the GPU first.
+    if (!encode_binding && !pCountBuffer) {
+      if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED && !index_buffer)
+        return;
+      auto buffer = arg_buffer->buffer->current()->buffer();
+      for (UINT i = 0; i < MaxCommandCount; i++) {
+        uint64_t offset = ArgBufferOffset + uint64_t(i) * sig->ByteStride;
+        if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) {
+          auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed_indirect>();
+          cmd.type = WMTRenderCommandDrawIndexedIndirect;
+          cmd.primitive_type = primitive_type;
+          cmd.index_type = index_type;
+          cmd.index_buffer = index_buffer;
+          cmd.index_buffer_offset = index_offset;
+          cmd.indirect_args_buffer = buffer;
+          cmd.indirect_args_offset = offset;
+        } else {
+          auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indirect>();
+          cmd.type = WMTRenderCommandDrawIndirect;
+          cmd.primitive_type = primitive_type;
+          cmd.indirect_args_buffer = buffer;
+          cmd.indirect_args_offset = offset;
+        }
+      }
+      return;
+    }
+
     auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
     cmd->max_count_buffer = CountBufferAddress;
     cmd->argument_buffer = ArgBufferAddress;
@@ -1825,6 +1854,9 @@ public:
       ERR("SetViewInstanceMask: view instancing isn't supported; mask ", Mask, " ignored");
   }
 
+  // Each value is staged in the allocator's GPU heap and a blit copies it to its address, in the list's order. A
+  // blit starts once the work before it ends, which is what MARKER_OUT asks for and more than MARKER_IN and DEFAULT
+  // do. Engines write GPU crash breadcrumbs this way, and Mesa's OpenGL copies query results with it.
   void STDMETHODCALLTYPE
   WriteBufferImmediate(
       UINT Count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER *pParams, const D3D12_WRITEBUFFERIMMEDIATE_MODE *pModes
@@ -1942,6 +1974,19 @@ public:
     bool has_view = pView;
     D3D12_INDEX_BUFFER_VIEW view = pView ? *pView : D3D12_INDEX_BUFFER_VIEW{};
     Record([=](auto list) { list->IASetIndexBuffer(has_view ? &view : nullptr); });
+  }
+
+  void STDMETHODCALLTYPE
+  WriteBufferImmediate(
+      UINT Count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER *pParams, const D3D12_WRITEBUFFERIMMEDIATE_MODE *pModes
+  ) override {
+    std::vector<D3D12_WRITEBUFFERIMMEDIATE_PARAMETER> params(pParams, pParams ? pParams + Count : pParams);
+    std::vector<D3D12_WRITEBUFFERIMMEDIATE_MODE> modes(pModes, pModes ? pModes + Count : pModes);
+    Record([=](auto list) {
+      static_cast<ID3D12GraphicsCommandList2 *>(list)->WriteBufferImmediate(
+          params.size(), params.data(), modes.empty() ? nullptr : modes.data()
+      );
+    });
   }
 
   void STDMETHODCALLTYPE

@@ -173,6 +173,7 @@ public:
       return E_INVALIDARG;
     bool is_compute = side_effect == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     CommandType = side_effect;
+    ByteStride = pDesc->ByteStride;
     UpdateIndexBuffer = ib_index != ~0u;
 
     if (is_compute)

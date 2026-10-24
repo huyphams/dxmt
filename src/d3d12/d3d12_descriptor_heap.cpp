@@ -692,8 +692,10 @@ CreateDescriptorHeap(
   InitReturnPtr(ppDescriptorHeap);
   if (!pDesc)
     return E_INVALIDARG;
-  if (pDesc->NumDescriptors > 0xFFFFF) {
-    ERR("CreateDescriptorHeap: NumDescriptors is too large");
+  /* Resource binding tier 3 has no fixed heap limit (1,000,000 and up), and Unreal Engine 5 makes its global heap
+   * bigger than tier 2's then. 2^24 descriptors take 512 MiB of the 4 GiB handle space. */
+  if (pDesc->NumDescriptors > (1u << 24)) {
+    ERR("CreateDescriptorHeap: NumDescriptors ", pDesc->NumDescriptors, " is too large");
     return E_INVALIDARG;
   }
   switch (pDesc->Type) {

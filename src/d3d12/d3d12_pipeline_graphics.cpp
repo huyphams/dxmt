@@ -116,6 +116,8 @@ constexpr WMTBlendFactor kBlendAlphaFactorMap[] = {
     WMTBlendFactorOneMinusSource1Color,
     WMTBlendFactorSource1Alpha,
     WMTBlendFactorOneMinusSource1Alpha,
+    WMTBlendFactorBlendAlpha, // ALPHA_FACTOR
+    WMTBlendFactorOneMinusBlendAlpha,
 };
 
 constexpr WMTColorWriteMask kColorWriteMaskMap[] = {
@@ -538,18 +540,17 @@ public:
         rootsig.bytecode_length = pDesc->VS.BytecodeLength;
       }
       rootsig.next = &data_ia_layout;
-      SM50ShaderBitcode vs_bitcode;
-
-      if (SM50Compile(
-              shader_vs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, "vs_main", &vs_bitcode, &sm50_err
-          )) {
+      auto vs_data = CompileAIR(
+          {pDesc->VS}, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, "vs_main",
+          [&](sm50_bitcode_t *bitcode, sm50_error_t *error) {
+            return SM50Compile(shader_vs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, "vs_main", bitcode, error);
+          },
+          sm50_err
+      );
+      if (!vs_data) {
         ERR("Failed to compile vs shader: ", SM50GetErrorMessageString(sm50_err));
         return E_FAIL;
       }
-
-      SM50_COMPILED_BITCODE vs_bitcode_compiled;
-      SM50GetCompiledBitcode(vs_bitcode, &vs_bitcode_compiled);
-      auto vs_data = WMT::MakeDispatchData(vs_bitcode_compiled.Data, vs_bitcode_compiled.Size);
       auto vs_lib = metal.newLibrary(vs_data, err);
       vs_func = vs_lib.newFunction("vs_main");
     } else {
@@ -599,16 +600,19 @@ public:
       }
       rootsig.next = &data_ps;
 
-      SM50ShaderBitcode ps_bitcode;
-      if (SM50Compile(
-              shader_ps, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(), &ps_bitcode, &sm50_err
-          )) {
+      auto ps_data = CompileAIR(
+          {pDesc->PS}, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(),
+          [&](sm50_bitcode_t *bitcode, sm50_error_t *error) {
+            return SM50Compile(
+                shader_ps, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(), bitcode, error
+            );
+          },
+          sm50_err
+      );
+      if (!ps_data) {
         ERR("Failed to compile ps shader: ", SM50GetErrorMessageString(sm50_err));
         return E_FAIL;
       }
-      SM50_COMPILED_BITCODE ps_bitcode_compiled;
-      SM50GetCompiledBitcode(ps_bitcode, &ps_bitcode_compiled);
-      auto ps_data = WMT::MakeDispatchData(ps_bitcode_compiled.Data, ps_bitcode_compiled.Size);
       auto ps_lib = metal.newLibrary(ps_data, err);
       ps_func = ps_lib.newFunction(ps_name.c_str());
     }
@@ -789,19 +793,20 @@ public:
 
         auto compile_vs = [&](bool strip) -> WMT::Reference<WMT::Function> {
           geometry.strip_topology = strip;
-          SM50ShaderBitcode vsgs_bitcode;
-
-          if (SM50CompileGeometryPipelineVertex(
-                  shader_vs, shader_gs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&geometry, "vsgs_main", &vsgs_bitcode,
-                  &sm50_err
-              )) {
+          // The error is SM50Error's to free, once.
+          auto vsgs_data = CompileAIR(
+              {pDesc->VS, pDesc->GS}, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&geometry, "vsgs_main",
+              [&](sm50_bitcode_t *bitcode, sm50_error_t *error) {
+                return SM50CompileGeometryPipelineVertex(
+                    shader_vs, shader_gs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&geometry, "vsgs_main", bitcode, error
+                );
+              },
+              sm50_err
+          );
+          if (!vsgs_data) {
             ERR("Failed to compile shader: ", SM50GetErrorMessageString(sm50_err));
             return {};
           }
-
-          SM50_COMPILED_BITCODE vsgs_bitcode_compiled;
-          SM50GetCompiledBitcode(vsgs_bitcode, &vsgs_bitcode_compiled);
-          auto vsgs_data = WMT::MakeDispatchData(vsgs_bitcode_compiled.Data, vsgs_bitcode_compiled.Size);
           auto vsgs_lib = metal.newLibrary(vsgs_data, err);
           return vsgs_lib.newFunction("vsgs_main");
         };
@@ -828,19 +833,19 @@ public:
         auto compile_gs = [&](bool strip) -> WMT::Reference<WMT::Function> {
           geometry.strip_topology = strip;
 
-          SM50ShaderBitcode gs_bitcode;
-
-          if (SM50CompileGeometryPipelineGeometry(
-                  shader_vs, shader_gs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&geometry, "gs_main", &gs_bitcode,
-                  &sm50_err
-              )) {
+          auto gs_data = CompileAIR(
+              {pDesc->VS, pDesc->GS}, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&geometry, "gs_main",
+              [&](sm50_bitcode_t *bitcode, sm50_error_t *error) {
+                return SM50CompileGeometryPipelineGeometry(
+                    shader_vs, shader_gs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&geometry, "gs_main", bitcode, error
+                );
+              },
+              sm50_err
+          );
+          if (!gs_data) {
             ERR("Failed to compile shader: ", SM50GetErrorMessageString(sm50_err));
             return {};
           }
-
-          SM50_COMPILED_BITCODE gs_bitcode_compiled;
-          SM50GetCompiledBitcode(gs_bitcode, &gs_bitcode_compiled);
-          auto gs_data = WMT::MakeDispatchData(gs_bitcode_compiled.Data, gs_bitcode_compiled.Size);
           auto gs_lib = metal.newLibrary(gs_data, err);
           return gs_lib.newFunction("gs_main");
         };
@@ -895,16 +900,19 @@ public:
       }
       rootsig.next = &data_ps;
 
-      SM50ShaderBitcode ps_bitcode;
-      if (SM50Compile(
-              shader_ps, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(), &ps_bitcode, &sm50_err
-          )) {
+      auto ps_data = CompileAIR(
+          {pDesc->PS}, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(),
+          [&](sm50_bitcode_t *bitcode, sm50_error_t *error) {
+            return SM50Compile(
+                shader_ps, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(), bitcode, error
+            );
+          },
+          sm50_err
+      );
+      if (!ps_data) {
         ERR("Failed to compile ps shader: ", SM50GetErrorMessageString(sm50_err));
         return E_FAIL;
       }
-      SM50_COMPILED_BITCODE ps_bitcode_compiled;
-      SM50GetCompiledBitcode(ps_bitcode, &ps_bitcode_compiled);
-      auto ps_data = WMT::MakeDispatchData(ps_bitcode_compiled.Data, ps_bitcode_compiled.Size);
       auto ps_lib = metal.newLibrary(ps_data, err);
       ps_func = ps_lib.newFunction(ps_name.c_str());
     }

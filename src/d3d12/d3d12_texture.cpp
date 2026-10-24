@@ -442,6 +442,18 @@ public:
     if (FAILED(hr))
       return hr;
 
+    // Relaxed casting lets a block-compressed texture be viewed in a plain format of its block's size, one texel a
+    // block; a Metal view can't, so the view reads nothing rather than another texture's worth of memory.
+    MTL_DXGI_FORMAT_DESC resource_format;
+    if (SUCCEEDED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, resource_format)) &&
+        ((resource_format.Flag ^ metal_format.Flag) & MTL_DXGI_FORMAT_BC)) {
+      static std::atomic<bool> said;
+      if (!said.exchange(true))
+        WARN("CreateShaderResourceView: a ", desc_.Format, " texture viewed as ", ViewDesc.Format,
+             " (compressed and plain): an empty view, said once");
+      return Heap->AddShaderResourceView(Index, &ViewDesc);
+    }
+
     view_descriptor.format = EncodeComponentMapping(ViewDesc.Shader4ComponentMapping, metal_format.PixelFormat);
 
     if (texture->pixelFormat() == WMTPixelFormatDepth32Float || texture->pixelFormat() == WMTPixelFormatDepth16Unorm) {
