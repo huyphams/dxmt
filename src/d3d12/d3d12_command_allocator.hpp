@@ -88,7 +88,20 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
 
   small_vector<EncoderData, 64> encoder_lists_;
 
-  small_vector<WMT::Reference<WMT::IndirectCommandBuffer>, 4> icb_;
+  /* Indirect command buffers, kept across Resets: making and freeing one is a call into the kernel each, and engines
+     call ExecuteIndirect many times a frame. The resolver rewrites every command an ExecuteIndirect runs, so one a
+     Reset handed back (the GPU is done with it then) serves any later one of its kind at least as large. */
+  struct IndirectCommandBuffer {
+    WMT::Reference<WMT::IndirectCommandBuffer> icb;
+    uint64_t gpu_resource_id;
+    uint64_t kind;
+    size_t max_count;
+  };
+  std::vector<IndirectCommandBuffer> icb_;
+  std::vector<IndirectCommandBuffer> icb_free_;
+
+  IndirectCommandBuffer &
+  AcquireIndirectCommandBuffer(WMTIndirectCommandBufferInfo &info, size_t MaxCount, WMTResourceOptions Options);
 
   ClearUAV<MTLD3D12CommandAllocatorImpl> clear_uav_;
   ClearRTV<MTLD3D12CommandAllocatorImpl> clear_rtv_;

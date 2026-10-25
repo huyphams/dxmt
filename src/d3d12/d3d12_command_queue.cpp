@@ -25,12 +25,14 @@
 #include "util_win32_compat.h"
 #include "util_env.hpp"
 #include <atomic>
+#include <optional>
 #include "d3d10_1.h"
 #include "d3d11_4.h"
 
 namespace dxmt {
 
 constexpr auto kCommandQueueSize = 32u;
+constexpr auto kPassesPerCommit = 24u;
 
 const GUID kD3D12CommandQueueDownlevelUUID = {
     0x38a8c5ef, 0x7ccb, 0x4e81, {0x91, 0x4f, 0xa6, 0xe9, 0xd0, 0x72, 0xc4, 0x94}
@@ -41,7 +43,11 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   D3D12_COMMAND_QUEUE_DESC desc_;
 
   WMT::Reference<WMT::CommandQueue> queue_;
+  /* Every pass waits for the one before (render passes at the fragment stage) and updates this at its end. */
   WMT::Reference<WMT::Fence> fence_;
+  /* Updated by each pass after a barrier, once all earlier work is done; the passes up to the next barrier wait for it
+   * before their vertex work (see EncoderData::after_barrier). */
+  WMT::Reference<WMT::Fence> barrier_fence_;
 
   std::atomic_uint64_t inflight_cmdbuf_seq_ = 1;
   std::atomic_uint64_t inflight_cmdbuf_count_ = 0;
@@ -141,6 +147,7 @@ public:
     queue_.addResidencySet(device_->GetGlobalResidencySet());
 
     fence_ = metal_device.newFence();
+    barrier_fence_ = metal_device.newFence();
 
     return S_OK;
   }
@@ -200,12 +207,25 @@ public:
 
   void STDMETHODCALLTYPE
   ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
-    auto scope = StartCommitting();
-    auto &cmdbuf = scope.inflight.cmdbuf;
+    /* A command buffer is committed every kPassesPerCommit passes, so the GPU starts on a long submission's first
+       passes while the rest are encoded: otherwise none of it reached the GPU before all of it was encoded. */
+    inflight_cmdbuf_count_.wait(kCommandQueueSize, std::memory_order_acquire);
+    std::optional<CommittingScope> scope;
+    scope.emplace(this);
+    unsigned passes = 0;
     for (unsigned i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
       EncoderData *current = pCommandList->entry;
       while (current) {
+        if (passes == kPassesPerCommit) {
+          scope.reset();
+          inflight_cmdbuf_count_.wait(kCommandQueueSize, std::memory_order_acquire);
+          scope.emplace(this);
+          passes = 0;
+        }
+        auto &cmdbuf = scope->inflight.cmdbuf;
+        if (current->type != EncoderType::Null)
+          passes++;
         switch (current->type) {
         case EncoderType::Null:
           break;
@@ -243,6 +263,8 @@ public:
             encoder.setLabel(WMT::String::string("ClearPass", WMTUTF8StringEncoding));
             encoder.waitForFence(fence_, WMTRenderStageFragment);
             encoder.updateFence(fence_, WMTRenderStageFragment);
+            if (current->after_barrier)
+              encoder.updateFence(barrier_fence_, WMTRenderStageFragment);
             encoder.endEncoding();
           }
           break;
@@ -297,9 +319,17 @@ public:
             render_pass_info.render_target_height = data->render_target_height;
           }
           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
-          encoder.waitForFence(fence_, WMTRenderStageVertex);
+          // Tessellation and geometry passes run stages besides vertex and fragment: they wait for everything.
+          if (data->after_barrier || data->use_tessellation || data->use_geometry) {
+            encoder.waitForFence(fence_, WMTRenderStageVertex);
+          } else {
+            encoder.waitForFence(barrier_fence_, WMTRenderStageVertex);
+            encoder.waitForFence(fence_, WMTRenderStageFragment);
+          }
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_, WMTRenderStageFragment);
+          if (data->after_barrier)
+            encoder.updateFence(barrier_fence_, WMTRenderStageVertex);
           encoder.endEncoding();
           break;
         }
@@ -309,6 +339,8 @@ public:
           encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
+          if (data->after_barrier)
+            encoder.updateFence(barrier_fence_);
           encoder.endEncoding();
           break;
         }
@@ -318,6 +350,8 @@ public:
           encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
+          if (data->after_barrier)
+            encoder.updateFence(barrier_fence_);
           encoder.endEncoding();
           break;
         }
@@ -335,6 +369,8 @@ public:
           encoder.waitForFence(fence_, WMTRenderStageFragment);
           encoder.setLabel(WMT::String::string("ResolvePass", WMTUTF8StringEncoding));
           encoder.updateFence(fence_, WMTRenderStageFragment);
+          if (data->after_barrier)
+            encoder.updateFence(barrier_fence_, WMTRenderStageFragment);
           encoder.endEncoding();
 
           break;

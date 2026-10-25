@@ -36,6 +36,10 @@ struct EncoderData {
   EncoderType type;
   EncoderData *next = nullptr;
   uint64_t id;
+  /* The first pass after a ResourceBarrier or a list's start: none of its work starts before the queue's earlier
+   * work is done. A pass between two barriers waits for the one before it only where D3D12 orders them (render
+   * targets, at the fragment stage), so its vertex work can overlap the fragment work before it. */
+  bool after_barrier = true;
 };
 
 struct ClearEncoderData : EncoderData {

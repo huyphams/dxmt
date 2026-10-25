@@ -199,6 +199,8 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   /* state */
 
   Flags<DirtyState> dirty_state_;
+  /* A ResourceBarrier since the last pass began (or the list's start): the next pass waits for all earlier work. */
+  bool barrier_pending_ = true;
 
   std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertex_buffers_;
 
@@ -280,6 +282,16 @@ public:
     index_offset = 0;
 
     dirty_state_.clrAll();
+    barrier_pending_ = true;
+  }
+
+  template <typename T>
+  T *
+  AllocatePass() {
+    auto pass = allocator_->AllocatePass<T>();
+    pass->after_barrier = barrier_pending_;
+    barrier_pending_ = false;
+    return pass;
   }
 
   HRESULT
@@ -383,7 +395,7 @@ public:
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
 
       allocator_->InvalidateCurrentPass();
-      auto render = allocator_->AllocatePass<RenderEncoderData>();
+      auto render = AllocatePass<RenderEncoderData>();
       render->type = EncoderType::Render;
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
@@ -809,7 +821,7 @@ public:
   PreDispatch(bool SkipResourceBinding = false) {
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
       allocator_->InvalidateCurrentPass();
-      auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+      auto compute = AllocatePass<ComputeEncoderData>();
       compute->type = EncoderType::Compute;
       compute->cmd_head.type = WMTComputeCommandNop;
       compute->cmd_head.next.set(0);
@@ -870,7 +882,7 @@ public:
   PreBlit() {
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Blit) {
       allocator_->InvalidateCurrentPass();
-      auto render = allocator_->AllocatePass<BlitEncoderData>();
+      auto render = AllocatePass<BlitEncoderData>();
       render->type = EncoderType::Blit;
       render->cmd_head.type = WMTBlitCommandNop;
       render->cmd_head.next.set(0);
@@ -1159,7 +1171,7 @@ public:
     auto DstSlice = DstSubresource / DstMips;
 
     allocator_->InvalidateCurrentPass();
-    auto resolve = allocator_->AllocatePass<ResolveEncoderData>();
+    auto resolve = AllocatePass<ResolveEncoderData>();
     resolve->type = EncoderType::Resolve;
 
     MTL_DXGI_FORMAT_DESC format_desc;
@@ -1276,8 +1288,10 @@ public:
   };
 
   void STDMETHODCALLTYPE ResourceBarrier(UINT Count, const D3D12_RESOURCE_BARRIER *barriers) {
-    // TODO: in the initial implementation, we force synchronize everything and ignore barriers (which can be used as
-    // optimization hints later)
+    // Passes split at barriers only: the next pass waits for all earlier work (see EncoderData::after_barrier). A
+    // barrier inside a render or compute pass orders nothing yet.
+    if (Count)
+      barrier_pending_ = true;
   };
 
   void STDMETHODCALLTYPE
@@ -1520,7 +1534,7 @@ public:
       return;
     }
     allocator_->InvalidateCurrentPass();
-    auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
+    auto encoder_info = AllocatePass<ClearEncoderData>();
     encoder_info->type = EncoderType::Clear;
     encoder_info->clear_dsv = CheckedFlags;
     encoder_info->depth_stencil = {Depth, Stencil};
@@ -1560,7 +1574,7 @@ public:
       return;
     }
     allocator_->InvalidateCurrentPass();
-    auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
+    auto encoder_info = AllocatePass<ClearEncoderData>();
     encoder_info->type = EncoderType::Clear;
     encoder_info->clear_dsv = 0;
     encoder_info->color = {Color[0], Color[1], Color[2], Color[3]};

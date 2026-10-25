@@ -97,10 +97,34 @@ public:
     heap = device_->GetMTLDevice().newHeap(info);
     if (!heap)
       return E_OUTOFMEMORY;
+    /* A heap's GPU address is aligned to its alignment, as on any GPU (see placement_base). Metal's own placement
+     * alignments are far smaller (256 bytes for buffers, 2 KB for textures), so moving every placement by whole
+     * pages keeps them. */
+    uint64_t base = BaseAddress();
+    if (base % desc_.Alignment) {
+      info.size = size_aligned + desc_.Alignment;
+      heap = device_->GetMTLDevice().newHeap(info);
+      if (!heap)
+        return E_OUTOFMEMORY;
+      base = BaseAddress();
+      placement_base = (desc_.Alignment - base % desc_.Alignment) % desc_.Alignment;
+    }
 
     device_->RegisterResidency(heap);
 
     return S_OK;
+  }
+
+  /* The GPU address of the Metal heap's start: that of a buffer placed there, as placed buffers are made. */
+  uint64_t
+  BaseAddress() {
+    WMTBufferInfo probe;
+    probe.memory.set(0);
+    probe.length = 256;
+    probe.options = WMTResourceHazardTrackingModeUntracked;
+    probe.gpu_address = 0;
+    WMT::Reference<WMT::Buffer> buffer = heap.newBuffer(probe, 0);
+    return buffer ? probe.gpu_address : 0;
   }
 
 #ifdef DXMT_NATIVE

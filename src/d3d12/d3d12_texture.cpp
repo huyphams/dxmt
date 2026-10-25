@@ -243,7 +243,7 @@ public:
     texture = new Texture(texture_info, device_->GetMTLDevice());
     Flags<TextureAllocationFlag> flags = {};
     if (pHeap) {
-      texture->rename(texture->allocate(flags, pHeap->heap, HeapOffset));
+      texture->rename(texture->allocate(flags, pHeap->heap, pHeap->placement_base + HeapOffset));
     } else {
       texture->rename(texture->allocate(flags));
       device_->RegisterResidency(texture->current()->texture());

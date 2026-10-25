@@ -78,7 +78,7 @@ public:
     } else
 #endif
     if (pHeap)
-      buffer->rename(buffer->allocate(flags, pHeap->heap, Offset));
+      buffer->rename(buffer->allocate(flags, pHeap->heap, pHeap->placement_base + Offset));
     else
       buffer->rename(buffer->allocate(flags));
     device_->RegisterResidencyAndVA(buffer->current());

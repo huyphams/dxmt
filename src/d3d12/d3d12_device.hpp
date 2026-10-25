@@ -100,6 +100,12 @@ public:
    * placed buffers map their own range of [external_offset, + SizeInBytes) of this fd. -1 otherwise. */
   int external_fd = -1;
   uint64_t external_offset = 0;
+  /* Where the heap's offset 0 is in its Metal heap. D3D12 gives a heap a GPU address aligned to the heap's alignment
+   * (64 KB, or 4 MB), and apps place resources by address: Unreal Engine 5's transient allocator aligns addresses and
+   * places a buffer at the offset that gives, which the runtime refuses unless it's 64 KB-aligned. Metal gives a heap
+   * a page-aligned address (half of them 32 KB past a 64 KB boundary), so such a heap is made an alignment larger and
+   * every resource placed this much further on. */
+  uint64_t placement_base = 0;
 };
 
 class MTLD3D12Fence : public ID3D12Fence1 {

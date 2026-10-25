@@ -64,22 +64,27 @@ MTLD3D12CommandAllocatorImpl::Initialize() {
     return E_OUTOFMEMORY;
   gpu_heap_offset_ = 0;
 
-  WMTBufferInfo buffer_info;
-  buffer_info.memory.set(gpu_heap_);
-  buffer_info.length = kGPUHeapSize;
-  buffer_info.options = WMTResourceHazardTrackingModeUntracked;
-  gpu_heap_buffer_ = device_->GetMTLDevice().newBuffer(buffer_info);
-
+  /* The same memory each time, so the same buffer: a Reset comes only after the GPU is done with it. */
   if (!gpu_heap_buffer_) {
-    ERR("CommandAllocator: failed to allocate gpu buffer");
-    return E_FAIL;
+    WMTBufferInfo buffer_info;
+    buffer_info.memory.set(gpu_heap_);
+    buffer_info.length = kGPUHeapSize;
+    buffer_info.options = WMTResourceHazardTrackingModeUntracked;
+    gpu_heap_buffer_ = device_->GetMTLDevice().newBuffer(buffer_info);
+
+    if (!gpu_heap_buffer_) {
+      ERR("CommandAllocator: failed to allocate gpu buffer");
+      return E_FAIL;
+    }
+    gpu_heap_buffer_address_ = buffer_info.gpu_address;
   }
-  gpu_heap_buffer_address_ = buffer_info.gpu_address;
 
   encoder_current = nullptr;
   encoder_last = nullptr;
   encoder_count_ = 0;
 
+  for (auto &icb : icb_)
+    icb_free_.push_back(std::move(icb));
   icb_.clear();
 
   copy_temp_allocator_.free_blocks(copy_temp_version_++);
@@ -147,6 +152,28 @@ MTLD3D12CommandAllocatorImpl::Reset() {
   return Initialize();
 };
 
+MTLD3D12CommandAllocatorImpl::IndirectCommandBuffer &
+MTLD3D12CommandAllocatorImpl::AcquireIndirectCommandBuffer(
+    WMTIndirectCommandBufferInfo &info, size_t MaxCount, WMTResourceOptions Options
+) {
+  /* What tells the two kinds' descriptors apart (the rest is fixed per kind). */
+  uint64_t kind = (uint64_t)info.type | ((uint64_t)info.inherit_buffers << 32) | ((uint64_t)Options << 40);
+  auto fit = icb_free_.end();
+  for (auto it = icb_free_.begin(); it != icb_free_.end(); ++it)
+    if (it->kind == kind && it->max_count >= MaxCount && (fit == icb_free_.end() || it->max_count < fit->max_count))
+      fit = it;
+  if (fit != icb_free_.end()) {
+    icb_.push_back(std::move(*fit));
+    if (fit != icb_free_.end() - 1)
+      *fit = std::move(icb_free_.back());
+    icb_free_.pop_back();
+  } else {
+    auto icb = device_->GetMTLDevice().newIndirectCommandBuffer(info, MaxCount, Options);
+    icb_.push_back({std::move(icb), info.gpu_resource_id, kind, MaxCount});
+  }
+  return icb_.back();
+}
+
 IndirectComputeCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount) {
   WMTIndirectCommandBufferInfo info;
@@ -171,13 +198,14 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
   info.max_object_threadgroup_memory_binding = 0;
   info.gpu_resource_id = 0;
 
-  auto icb = device_->GetMTLDevice().newIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModeShared);
+  auto &pooled = AcquireIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModeShared);
+  auto &icb = pooled.icb;
 
   auto [Ptr, Offset] = AllocateGPUHeap(sizeof(IndirectComputeCommandData), 16);
 
   auto data = reinterpret_cast<IndirectComputeCommandData *>(Ptr);
 
-  data->cmd_buf = info.gpu_resource_id;
+  data->cmd_buf = pooled.gpu_resource_id;
   data->max_count = MaxCount;
   data->tgsize_x = pPSO->threadgroup_size.width;
   data->tgsize_y = pPSO->threadgroup_size.height;
@@ -229,7 +257,6 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
   cmd.location = 0;
   cmd.length = MaxCount;
 
-  icb_.push_back(std::move(icb));
 
   return data;
 }
@@ -261,13 +288,14 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
   info.max_object_threadgroup_memory_binding = 0;
   info.gpu_resource_id = 0;
 
-  auto icb = device_->GetMTLDevice().newIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModePrivate);
+  auto &pooled = AcquireIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModePrivate);
+  auto &icb = pooled.icb;
 
   auto [Ptr, Offset] = AllocateGPUHeap(sizeof(IndirectRenderCommandData), 16);
 
   auto data = reinterpret_cast<IndirectRenderCommandData *>(Ptr);
 
-  data->cmd_buf = info.gpu_resource_id;
+  data->cmd_buf = pooled.gpu_resource_id;
   data->max_count = MaxCount;
 
   {
@@ -332,7 +360,6 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
   cmd.location = 0;
   cmd.length = MaxCount;
 
-  icb_.push_back(std::move(icb));
 
   return data;
 }
