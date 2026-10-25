@@ -80,7 +80,7 @@ to_shader_resource_type(ResourceKind kind) {
 std::optional<uint32_t> asU32(llvm::Value *value);
 
 llvm::Expected<std::pair<uint8_t, uint32_t>>
-resolve_handle(const llvm::Value *handle) {
+resolve_handle(const llvm::Value *handle, const EntryPoint &entry) {
   if (auto *ci = dyn_cast<CallInst>(handle)) {
     if (auto *callee = ci->getCalledFunction()) {
       StringRef name = callee->getName();
@@ -91,6 +91,14 @@ resolve_handle(const llvm::Value *handle) {
           return unsupported("dxil: non-constant createHandle arguments");
         return std::make_pair((uint8_t)*res_class, *range);
       }
+      if (name == "dx.op.createHandleFromBinding") {
+        auto *resource = find_binding(entry, ci->getArgOperand(1));
+        if (!resource)
+          return unsupported("dxil: createHandleFromBinding outside the declared resources");
+        return std::make_pair((uint8_t)resource->resource_class, resource->id);
+      }
+      if (name == "dx.op.annotateHandle")
+        return resolve_handle(ci->getArgOperand(1), entry);
       return unsupported("dxil: unsupported resource handle operation " + name.str());
     }
   }
@@ -1102,7 +1110,7 @@ initialize_shader(dxmt::dxbc::SM50ShaderInternal *shader, const Info &info) {
         continue;
 
       auto record_usage = [&](bool read, bool written, bool sampled, bool compared) -> llvm::Error {
-        auto key = resolve_handle(ci->getArgOperand(1));
+        auto key = resolve_handle(ci->getArgOperand(1), entry);
         if (!key)
           return key.takeError();
         switch ((ResourceClass)key->first) {
@@ -1130,8 +1138,10 @@ initialize_shader(dxmt::dxbc::SM50ShaderInternal *shader, const Info &info) {
       };
 
       switch (*opcode) {
-      case kOpCreateHandle: {
-        auto key = resolve_handle(ci);
+      case kOpCreateHandle:
+      case kOpCreateHandleFromBinding:
+      case kOpAnnotateHandle: {
+        auto key = resolve_handle(ci, entry);
         if (!key)
           return key.takeError();
         break;

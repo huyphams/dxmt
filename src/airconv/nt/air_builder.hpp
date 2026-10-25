@@ -199,6 +199,11 @@ public:
       Value *ArrayIndex = nullptr
   );
 
+  /* 64-bit atomic min and max (unsigned, returning nothing: all Metal has) on a texture of ulong, a RG32Uint one. */
+  void CreateAtomicMinMax64(
+      const Texture &Texture, Value *Handle, bool Max, Value *Pos, Value *ValVec4, Value *ArrayIndex = nullptr
+  );
+
   std::pair<Value *, Value *> CreateRead(
       const Texture &Texture, Value *Handle, Value *Pos, Value *ArrayIndex, Value *SampleIndexOrCubeFace, Value *Level,
       bool DeviceCoherent = false
@@ -415,6 +420,8 @@ public:
   Value *CreateIntBinOp(IntBinOp Op, Value *LHS, Value *RHS, bool Signed = false);
 
   Value *CreateAtomicRMW(AtomicRMWInst::BinOp Op, Value *Ptr, Value *Val);
+  /* 64-bit atomic min and max (unsigned, returning nothing) on an atomic_ulong in device memory. */
+  void CreateAtomicMinMax64(bool Max, Value *Ptr, Value *Val);
 
   llvm::Value *SanitizePosition(llvm::Value *Pos);
 

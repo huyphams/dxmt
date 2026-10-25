@@ -36,6 +36,29 @@ asU32(Value *value) {
   return std::nullopt;
 }
 
+const Resource *
+find_binding(const EntryPoint &entry, Value *bind) {
+  auto *c = dyn_cast<Constant>(bind);
+  if (!c)
+    return nullptr;
+  auto field = [&](unsigned i) -> std::optional<uint32_t> {
+    auto *element = c->getAggregateElement(i);
+    return element ? asU32(element) : std::nullopt;
+  };
+  auto lower = field(0), upper = field(1), space = field(2), resource_class = field(3);
+  if (!lower || !upper || !space || !resource_class)
+    return nullptr;
+  for (auto &resource : entry.resources) {
+    if ((uint32_t)resource.resource_class != *resource_class || resource.space != *space)
+      continue;
+    // An unbounded range's size is ~0u, as its binding's upper bound is.
+    uint64_t last = resource.range_size == ~0u ? ~0u : (uint64_t)resource.lower_bound + resource.range_size - 1;
+    if (resource.lower_bound <= *lower && *upper <= last)
+      return &resource;
+  }
+  return nullptr;
+}
+
 int32_t
 tryGetI32(Value *value) {
   if (auto *ci = dyn_cast<ConstantInt>(value))
@@ -71,6 +94,24 @@ Converter::Run(llvm::BasicBlock *ReturnBB) {
           break;
         value_map_[PHI] = ir.CreatePHI(MapType(PHI->getType()), 0);
       }
+    }
+
+    /* Static variables DXC keeps as globals in address space 0 (an array indexed dynamically) are each thread's own:
+       locals here, from their initializers. */
+    ir.SetInsertPoint(block_map_[&entry.function->getEntryBlock()]);
+    for (auto &Global : const_cast<llvm::Module *>(entry.function->getParent())->globals()) {
+      if (Global.getAddressSpace() != 0 || Global.isConstant() || Global.use_empty())
+        continue;
+      auto *Alloca = ir.CreateAlloca(MapType(Global.getValueType()), nullptr, Global.getName());
+      if (auto Align = Global.getAlign())
+        Alloca->setAlignment(*Align);
+      if (Global.hasInitializer() && !isa<UndefValue>(Global.getInitializer())) {
+        auto Initializer = MapConstant(Global.getInitializer());
+        if (!Initializer)
+          return Initializer.takeError();
+        ir.CreateStore(*Initializer, Alloca);
+      }
+      value_map_[&Global] = Alloca;
     }
 
     // FIXME: remove const_cast
@@ -357,11 +398,29 @@ Converter::MapGlobal(llvm::GlobalVariable *Global) {
   return Mapped;
 }
 
+bool
+Converter::RefersToLocal(const llvm::ConstantExpr *Expr) {
+  for (auto &Operand : Expr->operands()) {
+    if (isa<llvm::GlobalVariable>(Operand) && value_map_.count(Operand))
+      return true;
+    if (auto *Nested = llvm::dyn_cast<llvm::ConstantExpr>(Operand); Nested && RefersToLocal(Nested))
+      return true;
+  }
+  return false;
+}
+
 llvm::Expected<llvm::Value *>
 Converter::Get(llvm::Value *Value) {
   auto Found = value_map_.find(Value);
   if (Found != value_map_.end())
     return Found->second;
+  // A constant expression on a static variable (Run's locals): instructions where it's used.
+  if (auto *Expr = llvm::dyn_cast<llvm::ConstantExpr>(Value); Expr && RefersToLocal(Expr)) {
+    auto *Inst = Expr->getAsInstruction();
+    auto Result = TranslateInstruction(Inst);
+    Inst->deleteValue();
+    return Result;
+  }
   if (auto *Constant = llvm::dyn_cast<llvm::Constant>(Value)) {
     auto Mapped = MapConstant(Constant);
     if (!Mapped)
@@ -860,6 +919,9 @@ Converter::TranslateCall(llvm::CallInst &Call) {
     return unsupported("dxil: indirect call");
   if (Callee->getName().startswith("dx.op."))
     return EmitDxilOp(Call);
+  // Lifetime markers (DXIL 1.6 has them, for local arrays) only help optimization.
+  if (Callee->getName().startswith("llvm.lifetime."))
+    return (llvm::Value *)nullptr;
   return unsupported("dxil: unsupported call to " + Callee->getName().str());
 }
 
@@ -872,6 +934,10 @@ Converter::EmitDxilOp(CallInst &Call) {
   switch (auto OpId = *Op) {
   case kOpCreateHandle:
     return EmitCreateHandle(Call);
+  case kOpCreateHandleFromBinding:
+    return EmitCreateHandleFromBinding(Call);
+  case kOpAnnotateHandle:
+    return EmitAnnotateHandle(Call);
   case kOpCBufferLoadLegacy:
     return EmitCbufferLoadLegacy(Call);
   case kOpThreadId:
@@ -969,6 +1035,15 @@ Converter::EmitDxilOp(CallInst &Call) {
     return EmitDotProduct(Call, 3);
   case kOpDot4:
     return EmitDotProduct(Call, 4);
+  case kOpDot2AddHalf:
+    return EmitDot2AddHalf(Call);
+  case kOpDot4AddI8Packed:
+  case kOpDot4AddU8Packed:
+    return EmitDot4AddPacked(Call, OpId);
+  case kOpPack4x8:
+    return EmitPack4x8(Call);
+  case kOpUnpack4x8:
+    return EmitUnpack4x8(Call);
   case kOpIsNaN:
   case kOpIsInf:
   case kOpIsFinite:
@@ -1161,6 +1236,29 @@ Converter::EmitCreateHandle(CallInst &Call) {
   return (llvm::Value *)nullptr;
 }
 
+/* Shader model 6.6's handle: its index is the register, as createHandle's is. */
+llvm::Expected<llvm::Value *>
+Converter::EmitCreateHandleFromBinding(CallInst &Call) {
+  auto *Resource = find_binding(entry, Call.getArgOperand(1));
+  if (!Resource)
+    return unsupported("dxil: createHandleFromBinding outside the declared resources");
+  auto Index = Get(Call.getArgOperand(2));
+  if (!Index)
+    return Index.takeError();
+  handles_[&Call] = HandleInfo{Resource->resource_class, Resource->id, *Index};
+  return (llvm::Value *)nullptr;
+}
+
+/* The properties annotateHandle gives are the declaration's, which the handle has already: it stays the same. */
+llvm::Expected<llvm::Value *>
+Converter::EmitAnnotateHandle(CallInst &Call) {
+  auto Handle = ResolveHandleOperand(Call.getArgOperand(1));
+  if (!Handle)
+    return Handle.takeError();
+  handles_[&Call] = *Handle;
+  return (llvm::Value *)nullptr;
+}
+
 llvm::Expected<llvm::Value *>
 Converter::EmitCbufferLoadLegacy(CallInst &Call) {
   auto Handle = ResolveHandleOperand(Call.getArgOperand(1));
@@ -1267,7 +1365,7 @@ Converter::EmitBufferStore(CallInst &Call) {
     ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
   }
   auto Base = ir.CreateLShr(ByteOffset, ir.getInt32(2));
-  bool Coherent = Buffer->GlobalCoherent && SupportsMemoryCoherency();
+  bool Coherent = Buffer->GlobalCoherent;
 
   for (unsigned i = 0; i < 4; i++) {
     if (!(*Mask & (1u << i)))
@@ -1322,7 +1420,7 @@ Converter::EmitBufferLoad(CallInst &Call) {
     ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
   }
   auto Base = ir.CreateLShr(ByteOffset, ir.getInt32(2));
-  bool Coherent = Buffer->GlobalCoherent && SupportsMemoryCoherency();
+  bool Coherent = Buffer->GlobalCoherent;
 
   Value *Words = Constant::getNullValue(FixedVectorType::get(ir.getInt32Ty(), 4));
   for (unsigned i = 0; i < 4; i++) {
@@ -1566,7 +1664,7 @@ Converter::EmitRawBufferStore(CallInst &Call) {
     ByteOffset = ir.CreateMul(ByteOffset, ir.getInt32(Buffer->StructureStride));
     ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
   }
-  bool Coherent = Buffer->GlobalCoherent && SupportsMemoryCoherency();
+  bool Coherent = Buffer->GlobalCoherent;
   auto *TyElement = (*Component0)->getType();
   auto ElementSize = TyElement->getPrimitiveSizeInBits() / 8;
 
@@ -1610,7 +1708,7 @@ Converter::EmitRawBufferLoad(CallInst &Call) {
     ByteOffset = ir.CreateMul(ByteOffset, ir.getInt32(Buffer->StructureStride));
     ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
   }
-  bool Coherent = Buffer->GlobalCoherent && SupportsMemoryCoherency();
+  bool Coherent = Buffer->GlobalCoherent;
   auto *TyStruct = cast<StructType>(MapType(Call.getType()));
   Type *TyElement = TyStruct->getElementType(0);
   auto ElementSize = TyElement->getPrimitiveSizeInBits() / 8;
@@ -2359,6 +2457,90 @@ Converter::EmitDotProduct(const CallInst &Call, unsigned Dimension) {
   return air.CreateDotProduct(MakeVec(LHSs), MakeVec(RHSs));
 }
 
+/* dot2add: the accumulator plus the dot product of two half2, in float. */
+llvm::Expected<llvm::Value *>
+Converter::EmitDot2AddHalf(const CallInst &Call) {
+  if (Call.arg_size() != 6)
+    return unsupported("dxil: unexpected dot2AddHalf signature");
+  SmallVector<Value *, 5> Operands;
+  for (unsigned i = 1; i < 6; ++i) {
+    auto Operand = Get(Call.getArgOperand(i));
+    if (!Operand)
+      return Operand.takeError();
+    Operands.push_back(i == 1 ? *Operand : ir.CreateFPExt(*Operand, ir.getFloatTy()));
+  }
+  auto *Result = ir.CreateFAdd(Operands[0], ir.CreateFMul(Operands[1], Operands[3]));
+  return ir.CreateFAdd(Result, ir.CreateFMul(Operands[2], Operands[4]));
+}
+
+/* dot4add_i8packed and dot4add_u8packed: the accumulator plus the dot product of the four bytes of each operand, signed
+   or unsigned. */
+llvm::Expected<llvm::Value *>
+Converter::EmitDot4AddPacked(const CallInst &Call, uint32_t OpId) {
+  if (Call.arg_size() != 4)
+    return unsupported("dxil: unexpected dot4AddPacked signature");
+  auto Accumulator = Get(Call.getArgOperand(1));
+  if (!Accumulator)
+    return Accumulator.takeError();
+  auto A = Get(Call.getArgOperand(2));
+  if (!A)
+    return A.takeError();
+  auto B = Get(Call.getArgOperand(3));
+  if (!B)
+    return B.takeError();
+  bool IsSigned = OpId == kOpDot4AddI8Packed;
+  auto Byte = [&](Value *Packed, unsigned i) {
+    return IsSigned ? ir.CreateAShr(ir.CreateShl(Packed, 24 - 8 * i), 24)
+                    : ir.CreateAnd(ir.CreateLShr(Packed, 8 * i), 0xff);
+  };
+  Value *Result = *Accumulator;
+  for (unsigned i = 0; i < 4; ++i)
+    Result = ir.CreateAdd(Result, ir.CreateMul(Byte(*A, i), Byte(*B, i)));
+  return Result;
+}
+
+/* pack_u8, pack_s8 and their clamping forms: the low byte of each of four values, after clamping to an unsigned (mode
+   1) or signed (mode 2) byte's range. */
+llvm::Expected<llvm::Value *>
+Converter::EmitPack4x8(const CallInst &Call) {
+  auto Mode = asU32(Call.getArgOperand(1));
+  if (!Mode || *Mode > 2 || Call.arg_size() != 6)
+    return unsupported("dxil: unexpected pack4x8 signature");
+  Value *Result = ir.getInt32(0);
+  for (unsigned i = 0; i < 4; ++i) {
+    auto Component = Get(Call.getArgOperand(2 + i));
+    if (!Component)
+      return Component.takeError();
+    Value *Value = ir.CreateSExtOrTrunc(*Component, ir.getInt32Ty());
+    if (*Mode) {
+      int32_t Min = *Mode == 1 ? 0 : -128, Max = *Mode == 1 ? 255 : 127;
+      Value = ir.CreateSelect(ir.CreateICmpSLT(Value, ir.getInt32(Min)), ir.getInt32(Min), Value);
+      Value = ir.CreateSelect(ir.CreateICmpSGT(Value, ir.getInt32(Max)), ir.getInt32(Max), Value);
+    }
+    Result = ir.CreateOr(Result, ir.CreateShl(ir.CreateAnd(Value, 0xff), 8 * i));
+  }
+  return Result;
+}
+
+/* unpack_u8u32, unpack_s8s32 and their 16-bit forms: the four bytes, zero-extended (mode 0) or sign-extended (mode 1). */
+llvm::Expected<llvm::Value *>
+Converter::EmitUnpack4x8(const CallInst &Call) {
+  auto Mode = asU32(Call.getArgOperand(1));
+  if (!Mode || *Mode > 1 || Call.arg_size() != 3)
+    return unsupported("dxil: unexpected unpack4x8 signature");
+  auto Packed = Get(Call.getArgOperand(2));
+  if (!Packed)
+    return Packed.takeError();
+  auto *TyResult = llvm::cast<StructType>(MapType(Call.getType()));
+  Value *Result = PoisonValue::get(TyResult);
+  for (unsigned i = 0; i < 4; ++i) {
+    auto *Byte = *Mode ? ir.CreateAShr(ir.CreateShl(*Packed, 24 - 8 * i), 24)
+                       : ir.CreateAnd(ir.CreateLShr(*Packed, 8 * i), 0xff);
+    Result = ir.CreateInsertValue(Result, ir.CreateTrunc(Byte, TyResult->getElementType(i)), i);
+  }
+  return Result;
+}
+
 llvm::Expected<llvm::Value *>
 Converter::EmitIsSpecialFloat(const CallInst &Call, uint32_t OpId) {
   auto Operand = Get(Call.getArgOperand(1));
@@ -2425,6 +2607,13 @@ Converter::EmitAtomicRMW(const CallInst &Call) {
   if (!NewValue)
     return NewValue.takeError();
 
+  /* Metal's 64-bit atomics are unsigned min and max that return nothing, on buffers and on ulong textures (RG32Uint,
+     as a RWTexture2D<uint64_t> over R32G32_UINT is): what Nanite's InterlockedMax into its visibility buffer needs. */
+  bool Is64 = Call.getType()->isIntegerTy(64);
+  bool Max = BinOp == AtomicRMWInst::UMax;
+  if (Is64 && ((!Max && BinOp != AtomicRMWInst::UMin) || !Call.use_empty()))
+    return unsupported("dxil: 64-bit atomic other than an unsigned min or max whose result is unused");
+
   auto Buffer = GetBufferDescriptor(*Handle);
   if (Buffer) {
     auto Offset0 = Get(Call.getArgOperand(3));
@@ -2437,6 +2626,12 @@ Converter::EmitAtomicRMW(const CallInst &Call) {
         return ElementOffset.takeError();
       ByteOffset = ir.CreateMul(ByteOffset, ir.getInt32(Buffer->StructureStride));
       ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
+    }
+    if (Is64) {
+      air.CreateAtomicMinMax64(
+          Max, BufferElementPointer(*Buffer, ir.CreateAnd(ByteOffset, ir.getInt32(~7u)), ir.getInt64Ty()), *NewValue
+      );
+      return (llvm::Value *)nullptr;
     }
     auto *Ptr = BufferElementPointer(*Buffer, ir.CreateAnd(ByteOffset, ir.getInt32(~3u)), ir.getInt32Ty());
     auto Value = air.CreateAtomicRMW(BinOp, Ptr, *NewValue);
@@ -2467,6 +2662,12 @@ Converter::EmitAtomicRMW(const CallInst &Call) {
     auto *OOB = ir.CreateICmpUGE(Position, ir.CreateTrunc(ir.CreateLShr(Texture->Metadata, 32uLL), air.getIntTy()));
     Position = ir.CreateAdd(Position, ir.CreateTrunc(Texture->Metadata, air.getIntTy()));
     Position = ir.CreateSelect(OOB, llvm::ConstantInt::getAllOnesValue(Position->getType()), Position);
+  }
+
+  if (Is64) {
+    auto *Value = ir.CreateInsertElement(PoisonValue::get(FixedVectorType::get(ir.getInt64Ty(), 4)), *NewValue, 0ull);
+    air.CreateAtomicMinMax64(MakeTexture(*Texture), Texture->ResourceHandle, Max, Position, Value, Slice);
+    return (llvm::Value *)nullptr;
   }
   auto *TyVector = FixedVectorType::get(GetTextureSampleType(Texture->SampleType), 4);
   auto *Value = ir.CreateInsertElement(PoisonValue::get(TyVector), *NewValue, 0ull);

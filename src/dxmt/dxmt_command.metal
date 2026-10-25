@@ -228,6 +228,9 @@ struct clear_data {
   return (int4)clear_value;
 }
 
+/* For a pipeline without a pixel shader where Metal needs a fragment function (a mesh pipeline). */
+[[fragment]] void fs_empty() {}
+
 struct depth_out {
   float depth [[depth(any)]];
 };

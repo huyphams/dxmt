@@ -504,7 +504,7 @@ public:
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
-    common.metal_version = SM50_SHADER_METAL_310;
+    common.metal_version = device_->GetShaderMetalVersion();
     common.next = nullptr;
 
     if (pDesc->VS.pShaderBytecode) {
@@ -746,7 +746,7 @@ public:
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
-    common.metal_version = SM50_SHADER_METAL_310;
+    common.metal_version = device_->GetShaderMetalVersion();
     common.next = nullptr;
 
     if (pDesc->VS.pShaderBytecode && pDesc->GS.pShaderBytecode) {
@@ -915,6 +915,10 @@ public:
       }
       auto ps_lib = metal.newLibrary(ps_data, err);
       ps_func = ps_lib.newFunction(ps_name.c_str());
+    } else {
+      /* Metal's mesh pipelines need a fragment function (validation aborts without one, as for a shadow pass's
+         geometry shader): one that writes nothing, which is what no pixel shader does. */
+      ps_func = device_->GetLib().getLibrary().newFunction("fs_empty");
     }
 
     // PSO
@@ -981,7 +985,7 @@ public:
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
-    common.metal_version = SM50_SHADER_METAL_310;
+    common.metal_version = device_->GetShaderMetalVersion();
     common.next = nullptr;
 
     if (pDesc->VS.pShaderBytecode && pDesc->HS.pShaderBytecode && pDesc->DS.pShaderBytecode) {
@@ -1148,6 +1152,10 @@ public:
       auto ps_data = WMT::MakeDispatchData(ps_bitcode_compiled.Data, ps_bitcode_compiled.Size);
       auto ps_lib = metal.newLibrary(ps_data, err);
       ps_func = ps_lib.newFunction(ps_name.c_str());
+    } else {
+      /* Metal's mesh pipelines need a fragment function (validation aborts without one, as for a shadow pass's
+         tessellated geometry): one that writes nothing, which is what no pixel shader does. */
+      ps_func = device_->GetLib().getLibrary().newFunction("fs_empty");
     }
 
     // PSO

@@ -203,6 +203,39 @@ AIRBuilder::CreateAtomicRMW(
   return builder.CreateCall(Fn, Ops);
 }
 
+void
+AIRBuilder::CreateAtomicMinMax64(
+    const Texture &Texture, Value *Handle, bool Max, Value *Pos, Value *ValVec4, Value *ArrayIndex
+) {
+  assert(Texture.kind <= Texture::last_resource_kind);
+  auto &TexInfo = TextureInfo[Texture.kind];
+  auto &Context = getContext();
+  auto Attrs = AttributeList::get(
+      Context,
+      {
+          {1U, Attribute::get(Context, Attribute::AttrKind::NoCapture)},
+          {~0U, Attribute::get(Context, Attribute::AttrKind::NoUnwind)},
+          {~0U, Attribute::get(Context, Attribute::AttrKind::WillReturn)},
+      }
+  );
+
+  SmallVector<Value *> Ops{Handle, Pos};
+  if (TexInfo.is_array)
+    Ops.push_back(ArrayIndex);
+  Ops.push_back(ValVec4);
+  Ops.push_back(getInt(0)); // memory order relaxed
+  Ops.push_back(getInt(Texture.memory_access));
+  SmallVector<Type *> Tys;
+  for (auto *Op : Ops)
+    Tys.push_back(Op->getType());
+
+  std::string FnName = Max ? "air.atomic_max_explicit_" : "air.atomic_min_explicit_";
+  FnName += TexInfo.air_symbol_suffix;
+  FnName += getTypeOverloadSuffix(ValVec4->getType(), Signedness::Unsigned);
+  auto Fn = getModule()->getOrInsertFunction(FnName, FunctionType::get(getVoidTy(), Tys, false), Attrs);
+  builder.CreateCall(Fn, Ops);
+}
+
 std::pair<Value *, Value *>
 AIRBuilder::CreateAtomicCmpXchg(
     const Texture &Texture, Value *Handle, Value *Pos, Value *CmpVec4, Value *NewVec4, Value *ArrayIndex
@@ -2204,6 +2237,24 @@ AIRBuilder::CreateAtomicRMW(AtomicRMWInst::BinOp Op, Value *Ptr, Value *Val) {
       FnName, llvm::FunctionType::get(TyOp, {TyPtr, TyOp, getIntTy(), getIntTy(), getBoolTy()}, false), Attrs
   );
   return builder.CreateCall(Fn, {Ptr, Val, getInt(0), MemFlags, getBool(true)});
+}
+
+void
+AIRBuilder::CreateAtomicMinMax64(bool Max, Value *Ptr, Value *Val) {
+  auto &Context = getContext();
+  auto Attrs = AttributeList::get(
+      Context, {{1U, Attribute::get(Context, Attribute::AttrKind::NoCapture)},
+                {~0U, Attribute::get(Context, Attribute::AttrKind::NoUnwind)},
+                {~0U, Attribute::get(Context, Attribute::AttrKind::WillReturn)}}
+  );
+  auto Fn = getModule()->getOrInsertFunction(
+      Max ? "air.atomic.global.max.u.i64" : "air.atomic.global.min.u.i64",
+      llvm::FunctionType::get(
+          getVoidTy(), {Ptr->getType(), Val->getType(), getIntTy(), getIntTy(), getBoolTy()}, false
+      ),
+      Attrs
+  );
+  builder.CreateCall(Fn, {Ptr, Val, getInt(0), getInt(3), getBool(true)}); // relaxed, as CreateAtomicRMW's device ones
 }
 
 llvm::Value *

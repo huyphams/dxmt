@@ -192,6 +192,9 @@ class MTLD3D12Device : public ID3D12Device4 {
 public:
   virtual WMT::Device GetMTLDevice() = 0;
 
+  /* The Metal version shaders are converted for. */
+  virtual SM50_SHADER_METAL_VERSION GetShaderMetalVersion() = 0;
+
   virtual D3D_FEATURE_LEVEL GetFeatureLevel() = 0;
 
   virtual HRESULT GetAdapter(REFIID riid, void **ppAdapter) = 0;

@@ -30,6 +30,10 @@ enum class ThreadBuiltin : uint32_t {
 
 llvm::Error unsupported(llvm::StringRef what);
 
+/* The resource a shader model 6.6 binding (dx.types.ResBind: lower bound, upper bound, space and class) falls in, or
+   null when it isn't one of the entry point's. */
+const Resource *find_binding(const EntryPoint &entry, llvm::Value *bind);
+
 class Converter {
 public:
   Converter(const EntryPoint &entry, dxmt::dxbc::context &ctx);
@@ -53,6 +57,7 @@ private:
   llvm::Expected<llvm::Constant *> MapConstantExpr(llvm::ConstantExpr *Expr);
   llvm::Expected<llvm::Constant *> MapConstant(llvm::Constant *Constant);
   llvm::Expected<llvm::GlobalVariable *> MapGlobal(llvm::GlobalVariable *Constant);
+  bool RefersToLocal(const llvm::ConstantExpr *Expr);
   llvm::Expected<llvm::Value *> Get(llvm::Value *Value);
   llvm::Expected<HandleInfo> ResolveHandleOperand(llvm::Value *Operand);
   llvm::Optional<dxmt::dxbc::TextureDescirptor> GetTextureDescriptor(const HandleInfo &Handle);
@@ -81,6 +86,8 @@ private:
 
   llvm::Expected<llvm::Value *> EmitDxilOp(llvm::CallInst &Call);
   llvm::Expected<llvm::Value *> EmitCreateHandle(llvm::CallInst &Call);
+  llvm::Expected<llvm::Value *> EmitCreateHandleFromBinding(llvm::CallInst &Call);
+  llvm::Expected<llvm::Value *> EmitAnnotateHandle(llvm::CallInst &Call);
   llvm::Expected<llvm::Value *> EmitCbufferLoadLegacy(llvm::CallInst &Call);
   llvm::Expected<llvm::Value *> EmitThreadId(llvm::CallInst &Call, ThreadBuiltin Kind);
   llvm::Expected<llvm::Value *> EmitBufferStore(llvm::CallInst &Call);
@@ -103,6 +110,10 @@ private:
   llvm::Expected<llvm::Value *> EmitBinary(const llvm::CallInst &Call, uint32_t OpId);
   llvm::Expected<llvm::Value *> EmitTertiary(const llvm::CallInst &Call, uint32_t OpId);
   llvm::Expected<llvm::Value *> EmitDotProduct(const llvm::CallInst &Call, unsigned Dimension);
+  llvm::Expected<llvm::Value *> EmitDot2AddHalf(const llvm::CallInst &Call);
+  llvm::Expected<llvm::Value *> EmitDot4AddPacked(const llvm::CallInst &Call, uint32_t OpId);
+  llvm::Expected<llvm::Value *> EmitPack4x8(const llvm::CallInst &Call);
+  llvm::Expected<llvm::Value *> EmitUnpack4x8(const llvm::CallInst &Call);
   llvm::Expected<llvm::Value *> EmitIsSpecialFloat(const llvm::CallInst &Call, uint32_t OpId);
   llvm::Expected<llvm::Value *> EmitAtomicRMW(const llvm::CallInst &Call);
   llvm::Expected<llvm::Value *> EmitAtomicCmpXchg(const llvm::CallInst &Call);

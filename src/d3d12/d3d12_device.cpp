@@ -26,6 +26,7 @@
 #include "log/log.hpp"
 #ifndef _WIN32
 #include "d3d12_shared_native.hpp"
+#include <TargetConditionals.h>
 #endif
 #include <map>
 #include "d3d10_1.h"
@@ -45,6 +46,7 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
 
   dxmt::mutex residency_lock_;
   WMT::Reference<WMT::ResidencySet> residency_set_;
+  SM50_SHADER_METAL_VERSION shader_metal_version_ = SM50_SHADER_METAL_310;
   std::map<uint64_t, BufferAllocation *> interval_map_;
 
   InternalCommandLibrary command_library;
@@ -69,6 +71,20 @@ public:
       return E_FAIL;
     }
     format_inspector_.Inspect(GetMTLDevice());
+
+    /* Metal 3.2 where the OS has it, as dxmt::Device picks for Direct3D 11: memory barriers without an execution
+       barrier and coherent textures need it. */
+    uint64_t os_major_version = 0, os_minor_version = 0;
+    WMTGetOSVersion(&os_major_version, &os_minor_version, nullptr);
+#if TARGET_OS_OSX
+    const uint64_t v320 = 15;
+#elif TARGET_OS_VISION
+    const uint64_t v320 = 2;
+#else
+    const uint64_t v320 = 18;
+#endif
+    if (os_major_version >= v320 && GetMTLDevice().supportsFamily(WMTGPUFamilyApple7))
+      shader_metal_version_ = SM50_SHADER_METAL_320;
     
     WMTDepthStencilInfo info{};
     info.depth_compare_function = WMTCompareFunctionAlways;
@@ -76,6 +92,11 @@ public:
 
     return S_OK;
   };
+
+  SM50_SHADER_METAL_VERSION
+  GetShaderMetalVersion() override {
+    return shader_metal_version_;
+  }
 
   WMT::Device
   GetMTLDevice() {

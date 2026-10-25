@@ -53,7 +53,7 @@ public:
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
-    common.metal_version = SM50_SHADER_METAL_310;
+    common.metal_version = device_->GetShaderMetalVersion();
     common.next = &rootsig;
 
     if (HRESULT hr = InitializeShader(pDesc->CS, &shader_cs, &ref_cs); FAILED(hr))
