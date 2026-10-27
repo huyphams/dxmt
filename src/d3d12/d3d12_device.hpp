@@ -145,6 +145,11 @@ public:
 
 class MTLD3D12QueryHeap : public ID3D12QueryHeap {
 public:
+  /* Changed for VMPal, 2026-10-27: each query's result, Stride bytes apart: an occlusion count, or 0 or 1 for a
+     binary one. Timestamps and statistics aren't counted: they stay 0. */
+  WMT::Reference<WMT::Buffer> Results;
+  UINT Count = 0;
+  UINT Stride = 0;
 };
 
 class MTLD3D12Device;

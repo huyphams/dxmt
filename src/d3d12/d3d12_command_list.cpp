@@ -224,6 +224,26 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   scissors[D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {{}};
 
   Com<MTLD3D12GraphicsPipelineState, false> pso_graphics_;
+
+  /* Changed for VMPal, 2026-10-27: the occlusion query between BeginQuery and EndQuery (Direct3D 12 has one at a
+   * time). Its samples count into a slot of the allocator's GPU heap, zeroed as it begins, which the list's render
+   * passes take as their visibility result buffer, accumulating: a query across passes adds them up. EndQuery queues
+   * the slot's copy into the query heap, and ResolveQueryData and Close make them, in a pass after the passes
+   * before. Unreal Engine hides a mesh whose query counts nothing: with none counted, Black Myth: Wukong drew its
+   * forest without leaves, bushes and torches beyond a few metres. */
+  struct {
+    bool active = false;
+    WMTVisibilityResultMode mode = WMTVisibilityResultModeDisabled;
+    uint64_t slot = 0;
+    /* The render pass counting into the slot, if any: a pass begins with counting off. */
+    EncoderData *pass = nullptr;
+  } occlusion_;
+  struct QueryResultCopy {
+    uint64_t slot;
+    obj_handle_t heap;
+    uint64_t offset;
+  };
+  std::vector<QueryResultCopy> query_result_copies_;
   Com<MTLD3D12RootSignature, false> rootsig_graphics_;
   uint64_t rootarg_graphics_staging_[64];
 
@@ -243,6 +263,8 @@ public:
   ResetState(ID3D12PipelineState *pInitialPipelineState) {
     pso_graphics_ = nullptr;
     pso_compute_ = nullptr;
+    occlusion_ = {};
+    query_result_copies_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState); pso && pso->Wait()) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
@@ -338,6 +360,9 @@ public:
   Close() {
     if (encoder_count < std::numeric_limits<size_t>::max())
       return E_FAIL;
+    if (occlusion_.active)
+      StopOcclusion();
+    CopyQueryResults();
     return allocator_->EndRecord(&encoder_count);
   };
 
@@ -467,6 +492,9 @@ public:
 
     if (!pso_graphics_)
       return DrawCallStatus::Invalid;
+
+    if (occlusion_.active && occlusion_.pass != allocator_->encoder_current)
+      CountOcclusion();
 
     if (pso_graphics_->is_geometry && dirty_state_.test(DirtyState::Topology)) {
       dirty_state_.set(DirtyState::GraphicsPipelineState);
@@ -1777,14 +1805,79 @@ public:
     // do nothing for now
   };
 
+  /* Counts the current render pass's samples into the active occlusion query's slot. */
+  void
+  CountOcclusion() {
+    auto render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
+    render->visibility_buffer = allocator_->gpu_heap_buffer_;
+    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+    cmd.type = WMTRenderCommandSetVisibilityMode;
+    cmd.mode = occlusion_.mode;
+    cmd.offset = occlusion_.slot;
+    occlusion_.pass = allocator_->encoder_current;
+  }
+
+  void
+  StopOcclusion() {
+    if (occlusion_.pass && occlusion_.pass == allocator_->encoder_current) {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+      cmd.type = WMTRenderCommandSetVisibilityMode;
+      cmd.mode = WMTVisibilityResultModeDisabled;
+      cmd.offset = 0;
+    }
+    occlusion_.active = false;
+    occlusion_.pass = nullptr;
+  }
+
+  /* The queued copies of ended queries' slots into their heaps, in a pass that waits for the passes before it. */
+  void
+  CopyQueryResults() {
+    if (query_result_copies_.empty())
+      return;
+    barrier_pending_ = true;
+    allocator_->InvalidateCurrentPass();
+    PreBlit();
+    for (auto &copy : query_result_copies_) {
+      auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+      cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
+      cmd.src = allocator_->gpu_heap_buffer_;
+      cmd.src_offset = copy.slot;
+      cmd.dst = copy.heap;
+      cmd.dst_offset = copy.offset;
+      cmd.copy_length = sizeof(uint64_t);
+    }
+    query_result_copies_.clear();
+  }
+
   void STDMETHODCALLTYPE
   BeginQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
-    DEBUG("BeginQuery");
+    // Statistics count nothing: they resolve as zeros.
+    if (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)
+      return;
+    if (occlusion_.active)
+      StopOcclusion();
+    auto [slot_data, slot] = allocator_->AllocateGPUHeap(sizeof(uint64_t), sizeof(uint64_t));
+    *reinterpret_cast<uint64_t *>(slot_data) = 0;
+    occlusion_.active = true;
+    occlusion_.mode =
+        Type == D3D12_QUERY_TYPE_BINARY_OCCLUSION ? WMTVisibilityResultModeBoolean : WMTVisibilityResultModeCounting;
+    occlusion_.slot = slot;
+    occlusion_.pass = nullptr;
+    if (allocator_->encoder_current && allocator_->encoder_current->type == EncoderType::Render)
+      CountOcclusion();
   };
 
   void STDMETHODCALLTYPE
   EndQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
-    DEBUG("EndQuery");
+    // Timestamps aren't taken: they resolve as zeros.
+    if (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)
+      return;
+    if (!occlusion_.active)
+      return;
+    StopOcclusion();
+    auto heap = static_cast<MTLD3D12QueryHeap *>(pHeap);
+    if (heap && Index < heap->Count)
+      query_result_copies_.push_back({occlusion_.slot, heap->Results, uint64_t(Index) * heap->Stride});
   };
 
   void STDMETHODCALLTYPE
@@ -1792,7 +1885,21 @@ public:
       ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT StartIndex, UINT QueryCount, ID3D12Resource *pDstBuffer,
       UINT64 AlignedDstBufferOffset
   ) {
-    DEBUG("ResolveQueryData");
+    auto heap = static_cast<MTLD3D12QueryHeap *>(pHeap);
+    if (!heap || !pDstBuffer || !QueryCount || StartIndex >= heap->Count)
+      return;
+    QueryCount = std::min(QueryCount, heap->Count - StartIndex);
+    CopyQueryResults();
+    barrier_pending_ = true;
+    allocator_->InvalidateCurrentPass();
+    PreBlit();
+    auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+    cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
+    cmd.src = heap->Results;
+    cmd.src_offset = uint64_t(StartIndex) * heap->Stride;
+    cmd.dst = static_cast<MTLD3D12Resource *>(pDstBuffer)->buffer->current()->buffer();
+    cmd.dst_offset = AlignedDstBufferOffset;
+    cmd.copy_length = uint64_t(QueryCount) * heap->Stride;
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {

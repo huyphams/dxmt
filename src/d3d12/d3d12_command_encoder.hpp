@@ -105,6 +105,8 @@ struct RenderEncoderData : EncoderData {
   uint8_t dsv_readonly_flags;
   uint8_t render_target_count;
   bool use_visibility_result = 0;
+  /* Changed for VMPal, 2026-10-27: the allocator's GPU heap, where occlusion queries count, accumulating. */
+  obj_handle_t visibility_buffer = 0;
   bool use_tessellation = 0;
   bool use_geometry = 0;
 };

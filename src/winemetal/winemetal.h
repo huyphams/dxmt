@@ -696,6 +696,9 @@ struct WMTRenderPassInfo {
   uint32_t render_target_height;
   uint32_t render_target_width;
   obj_handle_t visibility_buffer;
+  /* Changed for VMPal, 2026-10-27: the pass adds its visibility results to what the buffer holds, rather than
+     writing them over it (MTLVisibilityResultTypeAccumulate). */
+  uint8_t visibility_accumulate;
 };
 
 WINEMETAL_API obj_handle_t MTLCommandBuffer_renderCommandEncoder(obj_handle_t cmdbuf, struct WMTRenderPassInfo *info);

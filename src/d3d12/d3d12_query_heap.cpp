@@ -16,8 +16,12 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+/* Changed for VMPal, 2026-10-27: query heaps hold results (see MTLD3D12QueryHeap). */
+
 #include "com/com_pointer.hpp"
 #include "d3d12_pageable.hpp"
+#include <algorithm>
+#include <cstring>
 
 namespace dxmt {
 
@@ -27,6 +31,30 @@ public:
 
   HRESULT
   Initialize(const D3D12_QUERY_HEAP_DESC *pDesc) {
+    if (!pDesc)
+      return E_INVALIDARG;
+    switch (pDesc->Type) {
+    case D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS:
+      Stride = sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS);
+      break;
+    case D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS1:
+      Stride = sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS1);
+      break;
+    case D3D12_QUERY_HEAP_TYPE_SO_STATISTICS:
+      Stride = sizeof(D3D12_QUERY_DATA_SO_STATISTICS);
+      break;
+    default:
+      Stride = sizeof(uint64_t);
+      break;
+    }
+    Count = pDesc->Count;
+    WMTBufferInfo info{};
+    info.length = std::max<uint64_t>(uint64_t(Count) * Stride, sizeof(uint64_t));
+    info.options = WMTResourceStorageModeShared;
+    Results = device_->GetMTLDevice().newBuffer(info);
+    if (!Results)
+      return E_OUTOFMEMORY;
+    std::memset(info.memory.ptr, 0, info.length);
     return S_OK;
   }
 

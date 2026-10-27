@@ -545,6 +545,10 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   descriptor.renderTargetHeight = info->render_target_height;
   descriptor.renderTargetWidth = info->render_target_width;
   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
+  if (info->visibility_buffer && info->visibility_accumulate) {
+    if (@available(macOS 14, iOS 17, tvOS 17, visionOS 1, *))
+      descriptor.visibilityResultType = MTLVisibilityResultTypeAccumulate;
+  }
 
   if (info->tile_height && info->tile_width) {
     descriptor.tileWidth = info->tile_width;
