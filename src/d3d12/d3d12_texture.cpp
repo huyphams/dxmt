@@ -249,6 +249,27 @@ public:
       device_->RegisterResidency(texture->current()->texture());
     }
 
+    /* Changed for VMPal, 2026-10-29: the twin that a plain-format view of a BC texture sees
+     * (MTLD3D12Resource::cast_twin). */
+    MTL_DXGI_FORMAT_DESC resource_format;
+    if ((desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
+        desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc_.SampleDesc.Count <= 1 &&
+        SUCCEEDED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, resource_format)) &&
+        (resource_format.Flag & MTL_DXGI_FORMAT_BC) &&
+        (resource_format.BytesPerTexel == 8 || resource_format.BytesPerTexel == 16)) {
+      WMTTextureInfo twin_info = texture_info;
+      twin_info.pixel_format = resource_format.BytesPerTexel == 8 ? WMTPixelFormatRG32Uint : WMTPixelFormatRGBA32Uint;
+      twin_info.width = (texture_info.width + 3) / 4;
+      twin_info.height = (texture_info.height + 3) / 4;
+      twin_info.mipmap_level_count = std::min<uint32_t>(
+          texture_info.mipmap_level_count, 32 - __builtin_clz(twin_info.width | twin_info.height)
+      );
+      twin_info.usage = WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite | WMTTextureUsagePixelFormatView;
+      cast_twin = new Texture(twin_info, device_->GetMTLDevice());
+      cast_twin->rename(cast_twin->allocate({}));
+      device_->RegisterResidency(cast_twin->current()->texture());
+    }
+
     return S_OK;
   };
 
@@ -282,6 +303,8 @@ public:
   ~MTLD3D12Texture() {
     if (texture && texture->current() && !texture->current()->flags().test(TextureAllocationFlag::AllocatedOnHeap))
       device_->UnregisterResidency(texture->current()->texture());
+    if (cast_twin && cast_twin->current())
+      device_->UnregisterResidency(cast_twin->current()->texture());
 #ifndef _WIN32
     if (shared_pod_.magic == DXN_SHARED_TEXTURE_MAGIC && shared_pod_.fd >= 0)
       close(shared_pod_.fd);
@@ -443,16 +466,34 @@ public:
       return hr;
 
     // Relaxed casting lets a block-compressed texture be viewed in a plain format of its block's size, one texel a
-    // block; a Metal view can't, so the view reads nothing rather than another texture's worth of memory.
+    // block; a Metal view can't. The view sees the texture's twin (cast_twin, changed for VMPal, 2026-10-29), and
+    // without one reads nothing rather than another texture's worth of memory.
+    Texture *target = texture.ptr();
     MTL_DXGI_FORMAT_DESC resource_format;
     if (SUCCEEDED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, resource_format)) &&
         ((resource_format.Flag ^ metal_format.Flag) & MTL_DXGI_FORMAT_BC)) {
-      static std::atomic<bool> said;
-      if (!said.exchange(true))
-        WARN("CreateShaderResourceView: a ", desc_.Format, " texture viewed as ", ViewDesc.Format,
-             " (compressed and plain): an empty view, said once");
-      return Heap->AddShaderResourceView(Index, &ViewDesc);
+      if (cast_twin && !(metal_format.Flag & MTL_DXGI_FORMAT_BC) &&
+          metal_format.BytesPerTexel == resource_format.BytesPerTexel) {
+        target = cast_twin.ptr();
+      } else {
+        static std::atomic<bool> said;
+        if (!said.exchange(true))
+          WARN("CreateShaderResourceView: a ", desc_.Format, " texture viewed as ", ViewDesc.Format,
+               " (compressed and plain): an empty view, said once");
+        return Heap->AddShaderResourceView(Index, &ViewDesc);
+      }
     }
+
+    // A twin may have fewer mips than the texture (a texel is a 4x4 block): a view past them reads nothing.
+    bool unviewable = false;
+    auto create_view = [&](const TextureViewDescriptor &d) {
+      if (target != texture.ptr() && (d.firstMiplevel + d.miplevelCount > target->miplevelCount() ||
+                                      d.firstArraySlice + d.arraySize > target->arrayLength())) {
+        unviewable = true;
+        return target->fullView;
+      }
+      return target->createView(d);
+    };
 
     view_descriptor.format = EncodeComponentMapping(ViewDesc.Shader4ComponentMapping, metal_format.PixelFormat);
 
@@ -472,7 +513,7 @@ public:
         view_descriptor.miplevelCount = ViewDesc.Texture1D.MipLevels;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       ResourceMinLODClamp = ViewDesc.Texture1D.ResourceMinLODClamp;
       break;
     }
@@ -488,7 +529,7 @@ public:
         view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice;
       else
         view_descriptor.arraySize = ViewDesc.Texture1DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       ResourceMinLODClamp = ViewDesc.Texture1DArray.ResourceMinLODClamp;
       break;
     }
@@ -501,7 +542,7 @@ public:
         view_descriptor.miplevelCount = ViewDesc.Texture2D.MipLevels;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       ResourceMinLODClamp = ViewDesc.Texture2D.ResourceMinLODClamp;
       break;
     }
@@ -517,7 +558,7 @@ public:
         view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice;
       else
         view_descriptor.arraySize = ViewDesc.Texture2DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       ResourceMinLODClamp = ViewDesc.Texture2DArray.ResourceMinLODClamp;
       break;
     }
@@ -530,7 +571,7 @@ public:
         view_descriptor.miplevelCount = ViewDesc.TextureCube.MipLevels;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 6;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       ResourceMinLODClamp = ViewDesc.TextureCube.ResourceMinLODClamp;
       break;
     }
@@ -545,7 +586,7 @@ public:
         view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.TextureCubeArray.First2DArrayFace;
       else
         view_descriptor.arraySize = ViewDesc.TextureCubeArray.NumCubes * 6;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       ResourceMinLODClamp = ViewDesc.TextureCubeArray.ResourceMinLODClamp;
       break;
     }
@@ -555,7 +596,7 @@ public:
       view_descriptor.miplevelCount = 1;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY: {
@@ -567,7 +608,7 @@ public:
         view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture2DMSArray.FirstArraySlice;
       else
         view_descriptor.arraySize = ViewDesc.Texture2DMSArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE3D: {
@@ -579,7 +620,7 @@ public:
         view_descriptor.miplevelCount = ViewDesc.Texture3D.MipLevels;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       ResourceMinLODClamp = ViewDesc.Texture3D.ResourceMinLODClamp;
       break;
     }
@@ -589,7 +630,9 @@ public:
 
     ResourceMinLODClamp = FLOAT((INT)ResourceMinLODClamp - view_descriptor.firstMiplevel);
 
-    return Heap->AddShaderResourceView(Index, texture.ptr(), View, ResourceMinLODClamp);
+    if (unviewable)
+      return Heap->AddShaderResourceView(Index, &ViewDesc);
+    return Heap->AddShaderResourceView(Index, target, View, ResourceMinLODClamp);
   };
 
   virtual HRESULT STDMETHODCALLTYPE
@@ -617,6 +660,35 @@ public:
     if (FAILED(hr))
       return hr;
 
+    /* Changed for VMPal, 2026-10-29: a plain view of a BC texture writes its twin (cast_twin); any other mix of
+     * compressed and plain is an empty view, which Metal would otherwise refuse by aborting the process. */
+    Texture *target = texture.ptr();
+    MTL_DXGI_FORMAT_DESC resource_format;
+    if (SUCCEEDED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, resource_format)) &&
+        ((resource_format.Flag ^ metal_format.Flag) & MTL_DXGI_FORMAT_BC)) {
+      if (cast_twin && !(metal_format.Flag & MTL_DXGI_FORMAT_BC) &&
+          metal_format.BytesPerTexel == resource_format.BytesPerTexel) {
+        target = cast_twin.ptr();
+      } else {
+        static std::atomic<bool> said;
+        if (!said.exchange(true))
+          WARN("CreateUnorderedAccessView: a ", desc_.Format, " texture viewed as ", ViewDesc.Format,
+               " (compressed and plain): an empty view, said once");
+        return Heap->AddUnorderedAccessView(Index, &ViewDesc);
+      }
+    }
+
+    // A twin may have fewer mips than the texture (a texel is a 4x4 block): a view past them reads nothing.
+    bool unviewable = false;
+    auto create_view = [&](const TextureViewDescriptor &d) {
+      if (target != texture.ptr() && (d.firstMiplevel + d.miplevelCount > target->miplevelCount() ||
+                                      d.firstArraySlice + d.arraySize > target->arrayLength())) {
+        unviewable = true;
+        return target->fullView;
+      }
+      return target->createView(d);
+    };
+
     view_descriptor.format = metal_format.PixelFormat;
 
     switch (ViewDesc.ViewDimension) {
@@ -626,7 +698,7 @@ public:
       view_descriptor.miplevelCount = 1;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE2D: {
@@ -635,7 +707,7 @@ public:
       view_descriptor.miplevelCount = 1;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE1DARRAY: {
@@ -647,7 +719,7 @@ public:
         view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice;
       else
         view_descriptor.arraySize = ViewDesc.Texture1DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE2DARRAY: {
@@ -659,7 +731,7 @@ public:
         view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice;
       else
         view_descriptor.arraySize = ViewDesc.Texture2DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE3D: {
@@ -668,7 +740,7 @@ public:
       view_descriptor.miplevelCount = 1;
       view_descriptor.firstArraySlice = 0;
       view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      View = create_view(view_descriptor);
       if (ViewDesc.Texture3D.FirstWSlice > 0) {
         ERR("3D UAV with WSlice unsupported");
       }
@@ -678,7 +750,9 @@ public:
       return E_INVALIDARG;
     }
 
-    return Heap->AddUnorderedAccessView(Index, texture.ptr(), View);
+    if (unviewable)
+      return Heap->AddUnorderedAccessView(Index, &ViewDesc);
+    return Heap->AddUnorderedAccessView(Index, target, View);
   };
 
   virtual HRESULT STDMETHODCALLTYPE

@@ -959,6 +959,23 @@ public:
       const D3D12_TEXTURE_COPY_LOCATION *pDst, UINT DstX, UINT DstY, UINT DstZ, const D3D12_TEXTURE_COPY_LOCATION *pSrc,
       const D3D12_BOX *pSrcBox
   ) {
+    CopyTextureRegionToTexture(pDst, DstX, DstY, DstZ, pSrc, pSrcBox);
+    /* Changed for VMPal, 2026-10-29: a copy into a BC texture with a twin goes into the twin too (cast_twin). */
+    if (pDst && pSrc && pDst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX) {
+      auto *dst = static_cast<MTLD3D12Resource *>(pDst->pResource);
+      if (dst && dst->cast_twin) {
+        uint32_t level = 0, slice = 0, planar = 0;
+        DecomposeSubresource(dst->GetDesc(), pDst->SubresourceIndex, &level, &slice, &planar);
+        CopyCastTwin(dst, false, level, slice);
+      }
+    }
+  }
+
+  void
+  CopyTextureRegionToTexture(
+      const D3D12_TEXTURE_COPY_LOCATION *pDst, UINT DstX, UINT DstY, UINT DstZ, const D3D12_TEXTURE_COPY_LOCATION *pSrc,
+      const D3D12_BOX *pSrcBox
+  ) {
     if (!pDst || !pSrc)
       return;
     if (!PreBlit())
@@ -1248,6 +1265,9 @@ public:
     cmd_cp.type = WMTBlitCommandCopyTexture;
     cmd_cp.src = pSrc->texture->current()->texture();
     cmd_cp.dst = pDst->texture->current()->texture();
+    /* Changed for VMPal, 2026-10-29: a copy into a BC texture with a twin goes into the twin too (cast_twin). */
+    if (pDst->cast_twin)
+      CopyCastTwin(pDst, false);
   };
 
   void STDMETHODCALLTYPE CopyTiles(
@@ -1397,7 +1417,84 @@ public:
     // barrier inside a render or compute pass orders nothing yet.
     if (Count)
       barrier_pending_ = true;
+    /* Changed for VMPal, 2026-10-29: after unordered access to a BC texture with a twin (MTLD3D12Resource::cast_twin)
+     * the twin, which the access wrote, is copied into it. Neptune sends an enhanced barrier from unordered access as
+     * a UAV barrier on the resource; a legacy one comes as it is. A global UAV barrier names no resource, and copies
+     * none. */
+    for (UINT i = 0; i < Count; i++) {
+      ID3D12Resource *written = nullptr;
+      if (barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_UAV)
+        written = barriers[i].UAV.pResource;
+      else if (barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
+               (barriers[i].Transition.StateBefore & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) &&
+               !(barriers[i].Flags & D3D12_RESOURCE_BARRIER_FLAG_END_ONLY))
+        written = barriers[i].Transition.pResource;
+      auto *resource = static_cast<MTLD3D12Resource *>(written);
+      if (resource && resource->cast_twin)
+        CopyCastTwin(resource, true);
+    }
   };
+
+  /* Changed for VMPal, 2026-10-29: copies a BC texture's twin (MTLD3D12Resource::cast_twin) into it, or it into the
+   * twin, a block to a texel through a temporary buffer as CopyTextureRegion does (Metal copies between textures only
+   * of one format): every mip and slice, or one subresource. Into the texture after a barrier, in a pass of its own
+   * after all earlier work, which the next pass waits for; into the twin right after a copy into the texture, in the
+   * copy's pass. */
+  void
+  CopyCastTwin(MTLD3D12Resource *resource, bool into_texture, int only_level = -1, int only_slice = -1) {
+    auto &bc = resource->texture;
+    auto &twin = resource->cast_twin;
+    if (!bc || !twin)
+      return;
+    if (into_texture)
+      allocator_->InvalidateCurrentPass();
+    if (!PreBlit())
+      return;
+    uint32_t block_bytes = twin->pixelFormat() == WMTPixelFormatRG32Uint ? 8 : 16;
+    for (uint32_t level = 0; level < twin->miplevelCount(); level++) {
+      if (only_level >= 0 && level != uint32_t(only_level))
+        continue;
+      uint32_t width = std::max(bc->width() >> level, 1u), height = std::max(bc->height() >> level, 1u);
+      uint32_t blocks_x = std::min((width + 3) / 4, std::max(twin->width() >> level, 1u));
+      uint32_t blocks_y = std::min((height + 3) / 4, std::max(twin->height() >> level, 1u));
+      WMTSize texels = {std::min(blocks_x * 4, width), std::min(blocks_y * 4, height), 1};
+      WMTSize blocks = {blocks_x, blocks_y, 1};
+      uint32_t bytes_per_row = align(blocks_x * block_bytes, 256);
+      for (uint32_t slice = 0; slice < bc->arrayLength(); slice++) {
+        if (only_slice >= 0 && slice != uint32_t(only_slice))
+          continue;
+        auto [temp_buffer, temp_buffer_offset] = allocator_->AllocateTempBuffer(bytes_per_row * blocks_y, 256);
+
+        auto &cmd_to_tmp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
+        cmd_to_tmp.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
+        cmd_to_tmp.src = (into_texture ? twin : bc)->current()->texture();
+        cmd_to_tmp.level = level;
+        cmd_to_tmp.slice = slice;
+        cmd_to_tmp.origin = {0, 0, 0};
+        cmd_to_tmp.size = into_texture ? blocks : texels;
+        cmd_to_tmp.dst = temp_buffer;
+        cmd_to_tmp.offset = temp_buffer_offset;
+        cmd_to_tmp.bytes_per_row = bytes_per_row;
+        cmd_to_tmp.bytes_per_image = 0;
+        cmd_to_tmp.options = WMTBlitOptionNone;
+
+        auto &cmd_to_tex = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
+        cmd_to_tex.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
+        cmd_to_tex.src = temp_buffer;
+        cmd_to_tex.src_offset = temp_buffer_offset;
+        cmd_to_tex.bytes_per_row = bytes_per_row;
+        cmd_to_tex.bytes_per_image = 0;
+        cmd_to_tex.size = into_texture ? texels : blocks;
+        cmd_to_tex.dst = (into_texture ? bc : twin)->current()->texture();
+        cmd_to_tex.level = level;
+        cmd_to_tex.slice = slice;
+        cmd_to_tex.origin = {0, 0, 0};
+        cmd_to_tex.options = WMTBlitOptionNone;
+      }
+    }
+    if (into_texture)
+      barrier_pending_ = true;
+  }
 
   void STDMETHODCALLTYPE
   ExecuteBundle(ID3D12GraphicsCommandList *CommandList) {

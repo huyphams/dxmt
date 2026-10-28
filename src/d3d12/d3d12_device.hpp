@@ -67,6 +67,13 @@ class MTLD3D12Resource : public ID3D12Resource {
 public:
   Rc<Texture> texture;
   Rc<Buffer> buffer;
+  /* Changed for VMPal, 2026-10-29: a block-compressed 2D texture made for unordered access has a twin in the plain
+   * format of its block's size (R32G32B32A32_UINT, or R32G32_UINT for BC1 and BC4), a texel a block, which its views
+   * in a plain format see. Relaxed format casting lets a shader write a BC texture that way, as Unreal Engine 5
+   * compresses runtime virtual textures; Metal makes no such view (asking aborts the process). A barrier after
+   * unordered access copies the twin into the texture (ResourceBarrier), and a copy into the texture copies it into
+   * the twin. Null otherwise. */
+  Rc<Texture> cast_twin;
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) = 0;
