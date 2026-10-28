@@ -17,6 +17,7 @@
  */
 
 #include "dxbc_converter.hpp"
+#include <format>
 #include <string>
 
 using namespace microsoft;
