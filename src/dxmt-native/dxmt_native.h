@@ -11,6 +11,9 @@
  *    src/d3d11/d3d11_texture_shared_native.cpp).
  *  - dxmt_native_abi_version: the DXN_ABI_VERSION this image was built
  *    with (dxn_embedder.h).
+ *  - dxmt_compile_waits / dxmt_set_compile_wait_hook: the threads waiting
+ *    for a shader or pipeline to compile, for an embedder that tells a
+ *    renderer waiting for Metal's compiler from a hung one.
  */
 
 #ifndef DXMT_NATIVE_H
@@ -39,6 +42,17 @@ int   dxmt_event_dup_fd(void* handle);
 dxn_wait_status dxmt_event_wait(void* handle, uint64_t timeout_ns);
 
 uint32_t dxmt_native_abi_version(void);
+
+/* == Compile waits ========================================================= */
+
+/* How many threads wait now for a shader or pipeline to compile (or compile
+ * one themselves).  A frame's commands are held until each new pipeline in
+ * them has compiled: seconds with Metal's cache cold. */
+uint32_t dxmt_compile_waits(void);
+/* hook(context) is called, on the waiting thread, as that count leaves 0 and
+ * as it goes back to 0: read dxmt_compile_waits() there, as two threads'
+ * calls can come in either order.  NULL removes it.  It must not block. */
+void dxmt_set_compile_wait_hook(void (*hook)(void *context), void *context);
 
 /* == Embedder-shared DYNAMIC buffer storage ================================ */
 

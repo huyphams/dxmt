@@ -28,5 +28,7 @@ _dxmt_event_close
 _dxmt_event_dup_fd
 _dxmt_event_wait
 _dxmt_native_abi_version
+_dxmt_compile_waits
+_dxmt_set_compile_wait_hook
 _dxmt_d3d11_buffer_bind_external_fd
 _dxmt_d3d11_buffer_external_cookie

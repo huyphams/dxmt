@@ -12,6 +12,7 @@
 
 #include "log/log.hpp"
 #include "dxmt_native.h"
+#include "dxmt_compile_wait.hpp"
 #include "../d3d11/d3d11_resource.hpp"
 
 #include <directx-native/dxn_log.h>
@@ -61,6 +62,16 @@ dxmt_event_wait(void *handle, uint64_t timeout_ns) {
 }
 
 extern "C" DXN_DEFINE_NATIVE_ABI_VERSION(dxmt_)
+
+extern "C" uint32_t
+dxmt_compile_waits(void) {
+  return dxmt::CompileWait::Count();
+}
+
+extern "C" void
+dxmt_set_compile_wait_hook(void (*hook)(void *context), void *context) {
+  dxmt::CompileWait::SetHook(hook, context);
+}
 
 extern "C" int32_t
 dxmt_d3d11_buffer_bind_external_fd(void *d3d11_buffer, int fd, uint64_t backing_length, uint32_t cookie) {

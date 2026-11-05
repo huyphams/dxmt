@@ -1,4 +1,5 @@
 #include "Metal.hpp"
+#include "dxmt_compile_wait.hpp"
 #include "d3d11_private.h"
 #include "d3d11_pipeline.hpp"
 #include "d3d11_device.hpp"
@@ -56,7 +57,10 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    if (!ready_.load(std::memory_order_acquire)) {
+      CompileWait waiting;
+      ready_.wait(false, std::memory_order_acquire);
+    }
     *pPipeline = {state_};
   }
 
@@ -190,7 +194,10 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_COMPUTE_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    if (!ready_.load(std::memory_order_acquire)) {
+      CompileWait waiting;
+      ready_.wait(false, std::memory_order_acquire);
+    }
     *pPipeline = {state_};
   }
 

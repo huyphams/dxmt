@@ -18,6 +18,7 @@
 
 #include "config/config.hpp"
 #include "d3d12_device.hpp"
+#include "dxmt_compile_wait.hpp"
 #include "d3d12_pageable.hpp"
 #include "d3d12_pipeline.hpp"
 #include "dxmt_format.hpp"
@@ -272,9 +273,12 @@ MTLD3D12PipelineState::RunCompile() {
 
 bool
 MTLD3D12PipelineState::Wait() {
+  uint32_t state = compile_state_.load(std::memory_order_acquire);
+  if (state == kCompiled || state == kFailed)
+    return state == kCompiled;
+  CompileWait waiting;
   if (Claim())
     CompileClaimed();
-  uint32_t state;
   while ((state = compile_state_.load(std::memory_order_acquire)) == kCompiling)
     compile_state_.wait(kCompiling, std::memory_order_acquire);
   return state == kCompiled;
