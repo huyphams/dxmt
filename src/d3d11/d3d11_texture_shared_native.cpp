@@ -169,6 +169,10 @@ AllocateShmLinearTexture2D(
   out_pod.planes[0].pitch = stride;
   out_pod.size = logical_size;
 
+  /* Changed for VMPal: this device's work and that of the process's other
+   * devices with shared textures run in the order it was committed. */
+  pDevice->GetDXMTDevice().queue().ShareTextures();
+
   out_texture = std::move(texture);
   out_allocation = std::move(allocation);
   return S_OK;

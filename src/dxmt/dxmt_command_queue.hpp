@@ -38,6 +38,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <span>
+#include <utility>
+#include <vector>
 
 namespace dxmt {
 
@@ -128,6 +130,10 @@ public:
   uint64_t signal_frame_latency_fence_;
   QueryReadbacks readback;
   uint64_t resource_initializer_event_id;
+  /* Changed for VMPal: the work of other queues sharing textures with this
+   * one, committed before this chunk, that it waits for: each queue's event
+   * and the value it reaches when that work is done (see ShareTextures). */
+  std::vector<std::pair<WMT::Reference<WMT::SharedEvent>, uint64_t>> shared_texture_waits;
 
 private:
   CommandQueue *queue;
@@ -148,6 +154,7 @@ public:
     list_enc.reset();
     ref_tracker.clear();
     attached_cmdbuf = nullptr;
+    shared_texture_waits.clear();
   }
 };
 
@@ -166,6 +173,12 @@ private:
   CpuFence cpu_coherent;
   CpuFence frame_latency_fence_;
   std::atomic_bool stopped;
+
+  /* Changed for VMPal: see ShareTextures. The event value this queue's last
+   * committed chunk signals, while it shares textures; guarded by the
+   * process's list of such queues. */
+  std::atomic_bool shares_textures_ = false;
+  uint64_t shared_committed_event_id_ = 0;
 
   std::array<CommandChunk, kCommandChunkCount> chunks;
   uint64_t encoder_seq = 1;
@@ -248,6 +261,18 @@ public:
 
   */
   void CommitCurrentChunk();
+
+  /* Changed for VMPal: called once this queue's device creates or opens a
+   * shared texture. From then on each chunk it commits waits on the GPU for
+   * the work other such queues in the process committed before it, so their
+   * work runs in the order it was committed, as on one GPU queue. Each device
+   * has its own Metal queue, and Metal doesn't order work across queues, but
+   * D3D11 lets a device read what another device wrote to a shared texture
+   * once the writer has flushed, without a keyed mutex or fence. WinAppSDK's
+   * compositor reads the app's Direct2D drawing that way, and it composed
+   * atlas pages before the drawing had run: whole batches of text came out
+   * blank until the next redraw (VMPal issue 115). */
+  void ShareTextures();
 
   uint64_t CurrentFrameSeq() {
     return frame_count + 1;

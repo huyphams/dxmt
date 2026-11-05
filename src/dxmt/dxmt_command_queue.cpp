@@ -23,10 +23,30 @@
 #include "util_env.hpp"
 #include "util_win32_compat.h"
 #include <atomic>
+#include <mutex>
+#include <vector>
 
 #define ASYNC_ENCODING 1
 
 namespace dxmt {
+
+namespace {
+
+/* Changed for VMPal: the process's queues that share textures (see
+ * CommandQueue::ShareTextures). Never destroyed: queues can outlive static
+ * destruction. */
+struct SharedTextureQueues {
+  std::mutex mutex;
+  std::vector<CommandQueue *> queues;
+};
+
+SharedTextureQueues &
+shared_texture_queues() {
+  static auto *queues = new SharedTextureQueues();
+  return *queues;
+}
+
+} // namespace
 
 void *
 CommandChunk::allocate_cpu_heap(size_t size, size_t alignment) {
@@ -74,6 +94,11 @@ CommandQueue::CommandQueue(WMT::Device device) :
 
 CommandQueue::~CommandQueue() {
   TRACE("Destructing command queue");
+  if (shares_textures_.load()) {
+    auto &shared = shared_texture_queues();
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    std::erase(shared.queues, this);
+  }
   stopped.store(true);
   ready_for_encode++;
   ready_for_encode.notify_one();
@@ -81,6 +106,15 @@ CommandQueue::~CommandQueue() {
   ready_for_commit.notify_one();
   SharedEventListener_destroy(shared_event_listener);
   encodeThread.join();
+  /* Changed for VMPal: chunks committed as the encoding thread stopped are
+   * dropped, and never signal what other queues sharing textures may wait
+   * for. Signal the last value after the work in flight. */
+  if (shares_textures_.load() && shared_committed_event_id_) {
+    auto pool = WMT::MakeAutoreleasePool();
+    auto cmdbuf = commandQueue.commandBuffer();
+    cmdbuf.encodeSignalEvent(event, shared_committed_event_id_);
+    cmdbuf.commit();
+  }
   finishThread.join();
   for (unsigned i = 0; i < kCommandChunkCount; i++) {
     auto &chunk = chunks[i];
@@ -98,6 +132,18 @@ CommandQueue::CommitCurrentChunk() {
   chunk.chunk_event_id = GetNextEventSeqId();
   chunk.frame_ = frame_count;
   chunk.resource_initializer_event_id = initializer.flushToWait();
+  if (shares_textures_.load(std::memory_order_relaxed)) {
+    /* Changed for VMPal: wait for what the other queues sharing textures
+     * committed before this chunk (see ShareTextures). Each queue's chunks
+     * finish in order, so its last one stands for all of them. */
+    auto &shared = shared_texture_queues();
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    for (auto other : shared.queues) {
+      if (other != this && other->shared_committed_event_id_ && other->device == device)
+        chunk.shared_texture_waits.emplace_back(other->event, other->shared_committed_event_id_);
+    }
+    shared_committed_event_id_ = chunk.chunk_event_id;
+  }
   auto& statistics = CurrentFrameStatistics();
   statistics.command_buffer_count++;
 #if ASYNC_ENCODING
@@ -154,6 +200,8 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
 
   auto cmdbuf = commandQueue.commandBuffer();
   chunk.attached_cmdbuf = cmdbuf;
+  for (auto &[event, value] : chunk.shared_texture_waits)
+    cmdbuf.encodeWaitForEvent(event, value);
   if (chunk.resource_initializer_event_id) {
     cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
   }
@@ -162,6 +210,18 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
 
   ready_for_commit.fetch_add(1, std::memory_order_release);
   ready_for_commit.notify_one();
+}
+
+void
+CommandQueue::ShareTextures() {
+  if (shares_textures_.load(std::memory_order_relaxed))
+    return;
+  auto &shared = shared_texture_queues();
+  std::lock_guard<std::mutex> lock(shared.mutex);
+  if (shares_textures_.load(std::memory_order_relaxed))
+    return;
+  shared.queues.push_back(this);
+  shares_textures_.store(true, std::memory_order_relaxed);
 }
 
 uint32_t
