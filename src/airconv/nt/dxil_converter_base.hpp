@@ -57,6 +57,8 @@ private:
   llvm::Expected<HandleInfo> ResolveHandleOperand(llvm::Value *Operand);
   llvm::Optional<dxmt::dxbc::TextureDescirptor> GetTextureDescriptor(const HandleInfo &Handle);
   llvm::Optional<dxmt::dxbc::BufferDescriptor> GetBufferDescriptor(const HandleInfo &Handle);
+  llvm::Value *
+  BufferElementPointer(const dxmt::dxbc::BufferDescriptor &Buffer, llvm::Value *ByteOffset, llvm::Type *Type);
   llvm::Expected<dxmt::dxbc::SamplerDescriptor> GetSamplerDescriptor(const HandleInfo &Handle);
   bool SupportsMemoryCoherency() const;
   bool SupportsNonExecutionBarrier() const;

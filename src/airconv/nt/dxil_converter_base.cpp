@@ -5,6 +5,7 @@
 #include "dxil_constants.hpp"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -73,7 +74,22 @@ Converter::Run(llvm::BasicBlock *ReturnBB) {
     }
 
     // FIXME: remove const_cast
-    for (auto &BB : *const_cast<llvm::Function *>(entry.function)) {
+    /* Blocks in reverse post-order: a value is translated before its uses, as its block dominates theirs, however
+       the blocks are laid out (DXC can put a loop's body before a block that dominates it). A phi gets each incoming
+       value at its predecessor's terminator. Blocks the entry doesn't reach end in unreachable. */
+    auto *Function = const_cast<llvm::Function *>(entry.function);
+    llvm::ReversePostOrderTraversal<llvm::Function *> Order(Function);
+    SmallPtrSet<llvm::BasicBlock *, 32> Reached;
+    for (auto *Block : Order)
+      Reached.insert(Block);
+    for (auto &BB : *Function) {
+      if (!Reached.contains(&BB)) {
+        ir.SetInsertPoint(block_map_[&BB]);
+        ir.CreateUnreachable();
+      }
+    }
+    for (auto *Block : Order) {
+      auto &BB = *Block;
       ir.SetInsertPoint(block_map_[&BB]);
       for (auto &Inst : BB) {
         if (isa<PHINode>(&Inst))
@@ -352,7 +368,10 @@ Converter::Get(llvm::Value *Value) {
       return Mapped.takeError();
     return *Mapped;
   }
-  return unsupported("dxil: reference to untranslated Value");
+  std::string what;
+  llvm::raw_string_ostream os(what);
+  Value->print(os);
+  return unsupported("dxil: reference to untranslated Value:" + what.substr(0, 200));
 }
 
 llvm::Error
@@ -662,6 +681,24 @@ llvm::Optional<dxmt::dxbc::BufferDescriptor>
 Converter::GetBufferDescriptor(const HandleInfo &Handle) {
   return Handle.resource_class == ResourceClass::SRV ? ctx.binding.GetSRVBuffer(air, Handle.range_id, Handle.index)
                                                      : ctx.binding.GetUAVBuffer(air, Handle.range_id, Handle.index);
+}
+
+/* A pointer to the buffer's Type at ByteOffset, or a null one when it isn't all within the view's byte length (its
+   metadata): Direct3D's robust buffer access, as the DXBC path's CreateGEPInt32WithBoundCheck gives it. A load from
+   the null page reads 0 and a store to it is dropped. */
+llvm::Value *
+Converter::BufferElementPointer(const dxmt::dxbc::BufferDescriptor &Buffer, llvm::Value *ByteOffset, llvm::Type *Type) {
+  auto AddrSpace = Buffer.Pointer->getType()->getPointerAddressSpace();
+  auto *Ptr = ir.CreatePointerCast(
+      ir.CreateGEP(ir.getInt8Ty(), ir.CreatePointerCast(Buffer.Pointer, ir.getInt8PtrTy(AddrSpace)), {ByteOffset}),
+      Type->getPointerTo(AddrSpace)
+  );
+  if (!Buffer.Metadata)
+    return Ptr;
+  auto *ByteLength = ir.CreateTrunc(Buffer.Metadata, ir.getInt32Ty());
+  auto *End = ir.CreateAdd(ByteOffset, ir.getInt32(Type->getPrimitiveSizeInBits() / 8));
+  auto *Within = ir.CreateAnd(ir.CreateICmpULT(ByteOffset, ByteLength), ir.CreateICmpULE(End, ByteLength));
+  return ir.CreateSelect(Within, Ptr, Constant::getNullValue(Ptr->getType()));
 }
 
 llvm::Expected<dxmt::dxbc::SamplerDescriptor>
@@ -1530,14 +1567,8 @@ Converter::EmitRawBufferStore(CallInst &Call) {
     ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
   }
   bool Coherent = Buffer->GlobalCoherent && SupportsMemoryCoherency();
-  auto BufferAddrSpace = Buffer->Pointer->getType()->getPointerAddressSpace();
   auto *TyElement = (*Component0)->getType();
-  auto Base = ir.CreatePointerCast(
-      ir.CreateGEP(
-          ir.getInt8Ty(), ir.CreatePointerCast(Buffer->Pointer, ir.getInt8PtrTy(BufferAddrSpace)), {ByteOffset}
-      ),
-      TyElement->getPointerTo(BufferAddrSpace)
-  );
+  auto ElementSize = TyElement->getPrimitiveSizeInBits() / 8;
 
   for (unsigned i = 0; i < 4; i++) {
     if (!(*Mask & (1u << i)))
@@ -1545,7 +1576,7 @@ Converter::EmitRawBufferStore(CallInst &Call) {
     auto Component = Get(Call.getArgOperand(4 + i));
     if (!Component)
       return Component.takeError();
-    auto *Ptr = ir.CreateConstGEP1_32(TyElement, Base, i);
+    auto *Ptr = BufferElementPointer(*Buffer, ir.CreateAdd(ByteOffset, ir.getInt32(i * ElementSize)), TyElement);
     if (Coherent)
       air.CreateDeviceCoherentStore(*Component, Ptr);
     else
@@ -1582,19 +1613,13 @@ Converter::EmitRawBufferLoad(CallInst &Call) {
   bool Coherent = Buffer->GlobalCoherent && SupportsMemoryCoherency();
   auto *TyStruct = cast<StructType>(MapType(Call.getType()));
   Type *TyElement = TyStruct->getElementType(0);
-  auto BufferAddrSpace = Buffer->Pointer->getType()->getPointerAddressSpace();
-  auto Base = ir.CreatePointerCast(
-      ir.CreateGEP(
-          ir.getInt8Ty(), ir.CreatePointerCast(Buffer->Pointer, ir.getInt8PtrTy(BufferAddrSpace)), {ByteOffset}
-      ),
-      TyElement->getPointerTo(BufferAddrSpace)
-  );
+  auto ElementSize = TyElement->getPrimitiveSizeInBits() / 8;
 
   Value *Vector = Constant::getNullValue(FixedVectorType::get(TyElement, 4));
   for (unsigned i = 0; i < 4; i++) {
     if (!(*Mask & (1u << i)))
       continue;
-    auto *Ptr = ir.CreateConstGEP1_32(TyElement, Base, i);
+    auto *Ptr = BufferElementPointer(*Buffer, ir.CreateAdd(ByteOffset, ir.getInt32(i * ElementSize)), TyElement);
     Value *Component =
         Coherent ? (Value *)air.CreateDeviceCoherentLoad(TyElement, Ptr) : (Value *)ir.CreateLoad(TyElement, Ptr);
     Vector = ir.CreateInsertElement(Vector, Component, (uint64_t)i);
@@ -2413,8 +2438,7 @@ Converter::EmitAtomicRMW(const CallInst &Call) {
       ByteOffset = ir.CreateMul(ByteOffset, ir.getInt32(Buffer->StructureStride));
       ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
     }
-    auto Index = ir.CreateLShr(ByteOffset, ir.getInt32(2));
-    auto *Ptr = ir.CreateGEP(ir.getInt32Ty(), Buffer->Pointer, {Index});
+    auto *Ptr = BufferElementPointer(*Buffer, ir.CreateAnd(ByteOffset, ir.getInt32(~3u)), ir.getInt32Ty());
     auto Value = air.CreateAtomicRMW(BinOp, Ptr, *NewValue);
     if (!Value)
       return unsupported("dxil: atomic operation failed");
@@ -2478,8 +2502,7 @@ Converter::EmitAtomicCmpXchg(const CallInst &Call) {
       ByteOffset = ir.CreateMul(ByteOffset, ir.getInt32(Buffer->StructureStride));
       ByteOffset = ir.CreateAdd(ByteOffset, *ElementOffset);
     }
-    auto Index = ir.CreateLShr(ByteOffset, ir.getInt32(2));
-    auto *Ptr = ir.CreateGEP(ir.getInt32Ty(), Buffer->Pointer, {Index});
+    auto *Ptr = BufferElementPointer(*Buffer, ir.CreateAnd(ByteOffset, ir.getInt32(~3u)), ir.getInt32Ty());
     auto Result = ir.CreateAtomicCmpXchg(
         Ptr, *Compare, *NewValue, MaybeAlign(), AtomicOrdering::Monotonic, AtomicOrdering::Monotonic
     );

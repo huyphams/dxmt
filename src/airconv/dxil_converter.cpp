@@ -106,9 +106,14 @@ to_signature_msl_type(ComponentType type) {
     return air::msl_int4;
   case ComponentType::U32:
     return air::msl_uint4;
+  /* unorm and snorm float (HLSL's `unorm float4 : SV_Target`): float, the range only a promise. */
   case ComponentType::F32:
+  case ComponentType::UNormF32:
+  case ComponentType::SNormF32:
     return air::msl_float4;
   case ComponentType::F16:
+  case ComponentType::UNormF16:
+  case ComponentType::SNormF16:
     return air::msl_half4;
   case ComponentType::I16:
     return air::msl_short4;
@@ -116,6 +121,21 @@ to_signature_msl_type(ComponentType type) {
     return air::msl_ushort4;
   default:
     return std::nullopt;
+  }
+}
+
+bool
+is_float_component(ComponentType type) {
+  switch (type) {
+  case ComponentType::F16:
+  case ComponentType::F32:
+  case ComponentType::UNormF16:
+  case ComponentType::SNormF16:
+  case ComponentType::UNormF32:
+  case ComponentType::SNormF32:
+    return true;
+  default:
+    return false;
   }
 }
 
@@ -448,7 +468,7 @@ initialize_pixel_signature(dxmt::dxbc::SM50ShaderInternal *shader) {
     }
     case SemanticKind::Arbitrary: {
       auto msl_type = to_signature_msl_type(element.component_type);
-      bool integer = element.component_type != ComponentType::F32 && element.component_type != ComponentType::F16;
+      bool integer = !is_float_component(element.component_type);
       auto interpolation = to_air_interpolation(
           element.interpolation, integer ? Interpolation::flat : Interpolation::center_perspective
       );

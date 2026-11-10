@@ -1376,7 +1376,17 @@ public:
         auto requested_alignment = desc->Alignment              ? desc->Alignment
                                    : desc->SampleDesc.Count > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT
                                                                 : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        /* No 4 KB placement: Neptune reports textures 64 KB-tiled, and Windows' runtime gives a texture of that layout
+           64 KB alignment whatever this says, with this size. A 4 KB-sized answer then sent Unreal Engine 5, which picks
+           its pool by size, to place it at 4 KB offsets that the runtime refused (E_INVALIDARG). The default alignment,
+           with a size to match, as a GPU without small textures answers. */
+        if (requested_alignment == D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT)
+          requested_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
         resource_info.Alignment = std::max(resource_info.Alignment, requested_alignment);
+        /* A multisampled texture's small alignment (64 KB) holds only within 4 MB, as on any GPU. */
+        if (desc->SampleDesc.Count > 1 && resource_info.Alignment < D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT &&
+            align(resource_info.SizeInBytes, resource_info.Alignment) > D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT)
+          resource_info.Alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
       }
 
       resource_info.SizeInBytes = align(resource_info.SizeInBytes, resource_info.Alignment);
