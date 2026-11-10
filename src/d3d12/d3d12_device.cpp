@@ -369,9 +369,13 @@ public:
       if (DataSize != sizeof(D3D12_FEATURE_DATA_SHADER_MODEL))
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_SHADER_MODEL *>(pFeatureData);
-      if (out->HighestShaderModel > D3D_SHADER_MODEL_6_0)
+      // 6.2: what 6.1 and 6.2 add beyond 6.0 is optional (view instancing, barycentrics, native 16-bit ops, each
+      // answered as absent), and the DXIL frontend takes their shaders. Engines compile for 6.2 at least (Godot's
+      // Direct3D 12 renderer does), and Windows refuses a shader above the highest model. The highest that isn't
+      // above the caller's, as Windows answers.
+      if (out->HighestShaderModel < D3D_SHADER_MODEL_5_1)
         return E_INVALIDARG;
-      out->HighestShaderModel = std::min(D3D_SHADER_MODEL_6_0, out->HighestShaderModel);
+      out->HighestShaderModel = std::min(D3D_SHADER_MODEL_6_2, out->HighestShaderModel);
       return S_OK;
     }
     case D3D12_FEATURE_D3D12_OPTIONS: {
@@ -432,7 +436,9 @@ public:
       if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS1))
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS1 *>(pFeatureData);
-      out->WaveOps = 0;
+      // Wave intrinsics are Metal's SIMD-group functions (airconv). Windows refuses a shader that uses them on a device
+      // without, as it does Godot's.
+      out->WaveOps = TRUE;
       // Apple GPUs run 32-wide SIMD groups. Zero lane counts read as an
       // invalid topology, and the D3D12 runtime then rejects the adapter
       // when a driver passes them through (Neptune's does).

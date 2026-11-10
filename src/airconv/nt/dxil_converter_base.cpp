@@ -1002,7 +1002,9 @@ Converter::EmitDxilOp(CallInst &Call) {
   case kOpBitcastF16toI16:
   case kOpBitcastF32toI32:
   case kOpBitcastI16toF16:
-  case kOpBitcastI32toF32: {
+  case kOpBitcastI32toF32:
+  case kOpBitcastF64toI64:
+  case kOpBitcastI64toF64: {
     auto Operand = Get(Call.getOperand(1));
     if (!Operand)
       return Operand.takeError();
@@ -2077,6 +2079,12 @@ Converter::EmitGather(const CallInst &Call, uint32_t OpId) {
   auto Component = Get(Call.getArgOperand(9));
   if (!Component)
     return Component.takeError();
+  // A gather without an offset has undef ones in DXIL. Metal's compiler takes zeros there, as its own front end
+  // writes them, and crashed on undef (AGCLLVMUserObject::replaceSamplerFunctionUses: Godot's compute shaders).
+  if (isa<UndefValue>(*O0))
+    *O0 = ir.getInt32(0);
+  if (isa<UndefValue>(*O1))
+    *O1 = ir.getInt32(0);
 
   Value *Offset = nullptr;
   Value *Coord = nullptr;
@@ -2652,9 +2660,15 @@ Converter::EmitBinaryWithTwoOutputs(const CallInst &Call, uint32_t OpId) {
 
   switch (OpId) {
   case kOpUDiv: {
+    // {quotient, remainder}, both 0xffffffff for a divisor of 0, as Direct3D's udiv (LLVM's udiv by 0 is undefined).
+    auto *ByZero = ir.CreateICmpEQ(*RHS, ir.getInt32(0));
+    auto *Divisor = ir.CreateSelect(ByZero, ir.getInt32(1), *RHS);
     return ir.CreateInsertValue(
-        ir.CreateInsertValue(llvm::PoisonValue::get(MapType(Call.getType())), ir.CreateUDiv(*LHS, *RHS), {0ull}),
-        ir.CreateURem(*LHS, *RHS), {1ull}
+        ir.CreateInsertValue(
+            llvm::PoisonValue::get(MapType(Call.getType())),
+            ir.CreateSelect(ByZero, ir.getInt32(~0u), ir.CreateUDiv(*LHS, Divisor)), {0ull}
+        ),
+        ir.CreateSelect(ByZero, ir.getInt32(~0u), ir.CreateURem(*LHS, Divisor)), {1ull}
     );
   }
   case kOpUMul: {

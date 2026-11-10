@@ -200,9 +200,12 @@ to_signature_msl_type_with_format(ComponentType type, air::MTLPixelFormat format
   }
 }
 
+/* The element's declared columns. Its usage mask (UsageCompMask) is a hint of the columns the shader reads or writes,
+ * and Mesa's DXIL (nir_to_dxil: Godot's shaders, GLOn12's) gives one that leaves columns out: a float4 position whose
+ * mask said x only kept y, z and w undefined, and the whole vertex shader folded to nothing. */
 uint32_t
 element_usage_mask(const SignatureElement &element) {
-  return element.usage_mask != 0 ? element.usage_mask : ((1u << element.cols) - 1u);
+  return (1u << element.cols) - 1u;
 }
 
 uint32_t
@@ -380,9 +383,13 @@ initialize_vertex_signature(dxmt::dxbc::SM50ShaderInternal *shader) {
   return llvm::Error::success();
 }
 
+/* `undefined` stands for InterpolationMode::Undefined, which DXBC converted to DXIL (dxilconv, as Windows' runtime does
+ * for a driver that takes DXIL) carries for an input the shader never reads: the default for the input's kind. */
 std::optional<Interpolation>
-to_air_interpolation(InterpolationMode mode) {
+to_air_interpolation(InterpolationMode mode, Interpolation undefined) {
   switch (mode) {
+  case InterpolationMode::Undefined:
+    return undefined;
   case InterpolationMode::Constant:
     return Interpolation::flat;
   case InterpolationMode::Linear:
@@ -441,7 +448,10 @@ initialize_pixel_signature(dxmt::dxbc::SM50ShaderInternal *shader) {
     }
     case SemanticKind::Arbitrary: {
       auto msl_type = to_signature_msl_type(element.component_type);
-      auto interpolation = to_air_interpolation(element.interpolation);
+      bool integer = element.component_type != ComponentType::F32 && element.component_type != ComponentType::F16;
+      auto interpolation = to_air_interpolation(
+          element.interpolation, integer ? Interpolation::flat : Interpolation::center_perspective
+      );
       if (!msl_type)
         return unsupported("dxil: unsupported pixel shader input component type");
       if (!interpolation)
@@ -504,7 +514,7 @@ initialize_pixel_signature(dxmt::dxbc::SM50ShaderInternal *shader) {
     }
     case SemanticKind::ClipDistance:
     case SemanticKind::CullDistance: {
-      auto interpolation = to_air_interpolation(element.interpolation);
+      auto interpolation = to_air_interpolation(element.interpolation, Interpolation::center_perspective);
       if (!interpolation)
         return unsupported("dxil: unsupported interpolation mode");
       for (unsigned row = 0; row < element.rows; row++) {
@@ -551,7 +561,8 @@ initialize_pixel_signature(dxmt::dxbc::SM50ShaderInternal *shader) {
         return unsupported("dxil: unsupported pixel shader output layout");
       auto msl_type = to_signature_msl_type(element.component_type);
       if (!msl_type)
-        return unsupported("dxil: unsupported pixel shader output component type");
+        return unsupported("dxil: unsupported pixel shader output component type " +
+                           std::to_string((unsigned)element.component_type));
       max_output_register = std::max(max_output_register, reg + 1);
       shader->pso_valid_output_reg_mask |= (1u << reg);
       shader->signature_handlers.push_back([=, component_type = element.component_type](SignatureContext &ctx) {

@@ -1705,8 +1705,10 @@ public:
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {
-    // No buffer turns predication off, which a list's state reset does (an embedder replays it).
-    if (pBuffer)
+    // No buffer turns predication off, which a list's state reset does (an embedder replays it). Said once: apps
+    // that predicate do it at every draw.
+    static std::atomic<bool> said;
+    if (pBuffer && !said.exchange(true))
       ERR("SetPredication: predication isn't supported; draws aren't skipped");
   };
 

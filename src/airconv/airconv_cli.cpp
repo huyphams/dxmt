@@ -46,6 +46,11 @@ static cl::opt<std::string>
 static cl::opt<std::string>
   GeometryAfterVertex("geometry-after-vertex", cl::desc("Compile vertex shader with supplied geometry shader"));
 
+static cl::opt<std::string> RootSignature(
+  "root-signature", cl::desc("Bind resources with this serialized Direct3D 12 root signature (DXIL shaders need one)"),
+  cl::value_desc("filename")
+);
+
 static cl::opt<bool>
   EmitLLVM("S", cl::init(false), cl::desc("Write output as LLVM assembly"));
 
@@ -230,6 +235,24 @@ int main(int argc, char **argv) {
   data.flags = {};
   data.next = 0;
   data.type = SM50_SHADER_COMMON;
+  SM50_SHADER_COMPILATION_ARGUMENT_DATA *args = (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data;
+
+  std::unique_ptr<MemoryBuffer> RootSignatureBuffer;
+  SM50_SHADER_ROOT_SIGNATURE_DATA root_signature;
+  if (!RootSignature.getValue().empty()) {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> FileOrErr = MemoryBuffer::getFile(RootSignature, /*IsText=*/false);
+    if (std::error_code EC = FileOrErr.getError()) {
+      SMDiagnostic(RootSignature, SourceMgr::DK_Error, "Could not open root signature: " + EC.message())
+        .print(argv[0], errs());
+      return 1;
+    }
+    RootSignatureBuffer = std::move(*FileOrErr);
+    root_signature.next = &data;
+    root_signature.type = SM50_SHADER_ROOT_SIGNATURE;
+    root_signature.bytecode = RootSignatureBuffer->getBufferStart();
+    root_signature.bytecode_length = RootSignatureBuffer->getBufferSize();
+    args = (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&root_signature;
+  }
 
   if (!HullBeforeDomain.getValue().empty()) {
     ErrorOr<std::unique_ptr<MemoryBuffer>> FileOrErr =
@@ -373,7 +396,7 @@ int main(int argc, char **argv) {
     }
   } else {
     if (auto err =
-          dxmt::dxbc::convertDXBC(sm50, "shader_main", Context, M, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data)) {
+          dxmt::dxbc::convertDXBC(sm50, "shader_main", Context, M, args)) {
       errs() << err << '\n';
       return 1;
     }

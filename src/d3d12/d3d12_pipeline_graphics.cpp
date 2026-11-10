@@ -166,12 +166,22 @@ ExtractMTLInputLayoutElements(
   uint32_t register_mask = 0;
 
   CSignatureParser parser;
+  const D3D11_SIGNATURE_PARAMETER *pParameters = nullptr;
+  UINT num_parameters = 0;
   HRESULT hr = DXBCGetInputSignature(pShaderBytecodeWithInputSignature, &parser);
-  if (FAILED(hr)) {
-    return hr;
+  if (SUCCEEDED(hr)) {
+    num_parameters = parser.GetParameters(&pParameters);
+  } else {
+    /* A DXIL container needn't carry an input signature part: one an embedder wraps a bare DXIL program in (Neptune,
+     * which adds the part for the vertex inputs it finds) has none for a vertex shader without inputs, such as one
+     * drawing from SV_VertexID alone (WebGPU's). It takes no inputs then. */
+    CDXBCParser container;
+    if (FAILED(container.ReadDXBCAssumingValidSize(pShaderBytecodeWithInputSignature)) ||
+        container.FindNextMatchingBlob(DXBC_DXIL, 0) == DXBC_BLOB_NOT_FOUND ||
+        container.FindNextMatchingBlob(DXBC_InputSignature, 0) != DXBC_BLOB_NOT_FOUND ||
+        container.FindNextMatchingBlob(DXBC_InputSignature11_1, 0) != DXBC_BLOB_NOT_FOUND)
+      return hr;
   }
-  const D3D11_SIGNATURE_PARAMETER *pParameters;
-  auto num_parameters = parser.GetParameters(&pParameters);
 
   UINT attribute_count = 0;
   for (UINT j = 0; j < NumElements; j++) {
@@ -528,7 +538,6 @@ public:
         rootsig.bytecode_length = pDesc->VS.BytecodeLength;
       }
       rootsig.next = &data_ia_layout;
-
       SM50ShaderBitcode vs_bitcode;
 
       if (SM50Compile(
