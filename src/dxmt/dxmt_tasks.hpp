@@ -18,7 +18,8 @@ template <typename Task> class task_scheduler {
 public:
   void submit(Task task);
 
-  task_scheduler();
+  /* Starts with two threads and adds one while all are busy, up to max_threads. */
+  task_scheduler(uint64_t max_threads = dxmt::thread::hardware_concurrency() * 2);
   ~task_scheduler();
 
   uint64_t
@@ -45,8 +46,7 @@ private:
   uint64_t max_threads;
 };
 
-template <typename Task> task_scheduler<Task>::task_scheduler() {
-  max_threads = dxmt::thread::hardware_concurrency() * 2;
+template <typename Task> task_scheduler<Task>::task_scheduler(uint64_t max_threads) : max_threads(max_threads) {
   workers_.reserve(max_threads);
   threads = 2;
 

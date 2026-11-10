@@ -66,6 +66,9 @@ public:
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 
     Flags<BufferAllocationFlag> flags;
+    // Its typed unordered access views write it, and R32 ones take atomics: their texture views need to say so.
+    if (desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+      flags.set(BufferAllocationFlag::ShaderWritable);
 #ifdef DXMT_NATIVE
     if (pHeap && pHeap->external_fd >= 0) {
       /* An imported heap: its pages in [Offset, Width), mapped whole pages (the heap's size is whole pages too). */

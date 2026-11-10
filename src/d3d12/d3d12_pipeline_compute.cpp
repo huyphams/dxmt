@@ -28,6 +28,10 @@ namespace dxmt {
 class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12ComputePipelineState> {
 
   MTL_SHADER_REFLECTION ref_cs;
+  /* The description, with its bytecode, kept for the compile: the app may free the bytecode once Initialize returns. */
+  D3D12_COMPUTE_PIPELINE_STATE_DESC desc_;
+  std::vector<uint8_t> cs_;
+  Com<ID3D12RootSignature> root_signature_;
 
 public:
   MTLD3D12ComputePipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12ComputePipelineState>(pDevice) {
@@ -36,6 +40,21 @@ public:
 
   HRESULT
   Initialize(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc) {
+    auto cs = (const uint8_t *)pDesc->CS.pShaderBytecode;
+    if (cs)
+      cs_.assign(cs, cs + pDesc->CS.BytecodeLength);
+    root_signature_ = pDesc->pRootSignature;
+    desc_ = *pDesc;
+    desc_.pRootSignature = root_signature_.ptr();
+    desc_.CS = {cs ? cs_.data() : nullptr, cs_.size()};
+    desc_.CachedPSO = {};
+    Queue(device_);
+    return S_OK;
+  }
+
+  HRESULT
+  Compile() final {
+    auto pDesc = &desc_;
 
     SM50Shader shader_cs;
     SM50Error sm50_err;
@@ -60,6 +79,7 @@ public:
       return hr;
 
     threadgroup_size = {ref_cs.ThreadgroupSize[0], ref_cs.ThreadgroupSize[1], ref_cs.ThreadgroupSize[2]};
+    persistent_threads = ref_cs.Flags & MTL_SHADER_FLAG_PERSISTENT_THREADS;
 
     auto cs_data = CompileAIR(
         {pDesc->CS}, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&common, "cs_main",

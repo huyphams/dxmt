@@ -244,6 +244,42 @@ ExtractMTLInputLayoutElements(
   return S_OK;
 }
 
+bool
+MTLD3D12PipelineState::Claim() {
+  uint32_t queued = kQueued;
+  return compile_state_.compare_exchange_strong(queued, kCompiling, std::memory_order_acquire);
+}
+
+void
+MTLD3D12PipelineState::CompileClaimed() {
+  auto pool = WMT::MakeAutoreleasePool();
+  compile_state_.store(SUCCEEDED(Compile()) ? kCompiled : kFailed, std::memory_order_release);
+  compile_state_.notify_all();
+}
+
+void
+MTLD3D12PipelineState::Queue(MTLD3D12Device *pDevice) {
+  AddRefPrivate();
+  pDevice->QueuePipelineCompile(this);
+}
+
+void
+MTLD3D12PipelineState::RunCompile() {
+  if (Claim())
+    CompileClaimed();
+  ReleasePrivate();
+}
+
+bool
+MTLD3D12PipelineState::Wait() {
+  if (Claim())
+    CompileClaimed();
+  uint32_t state;
+  while ((state = compile_state_.load(std::memory_order_acquire)) == kCompiling)
+    compile_state_.wait(kCompiling, std::memory_order_acquire);
+  return state == kCompiled;
+}
+
 HRESULT
 MTLD3D12PipelineState::InitializeShader(
     D3D12_SHADER_BYTECODE Bytecode, sm50_shader_t *ppShader, struct MTL_SHADER_REFLECTION *pRefl
@@ -263,8 +299,49 @@ MTLD3D12PipelineState::InitializeShader(
   return S_OK;
 }
 
+/* A graphics pipeline's description and what it points to, kept for the compile: the app may free the bytecode and
+   the input layout once CreatePipelineState returns. */
+struct GraphicsPipelineDesc {
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc;
+  std::vector<uint8_t> bytecode[5];
+  std::vector<std::string> semantic_names;
+  std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
+  Com<ID3D12RootSignature> root_signature;
+
+  void
+  Copy(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
+    desc = *pDesc;
+    root_signature = pDesc->pRootSignature;
+    desc.pRootSignature = root_signature.ptr();
+    D3D12_SHADER_BYTECODE *shaders[] = {&desc.VS, &desc.PS, &desc.DS, &desc.HS, &desc.GS};
+    for (unsigned i = 0; i < 5; i++) {
+      auto data = (const uint8_t *)shaders[i]->pShaderBytecode;
+      if (!data)
+        continue;
+      bytecode[i].assign(data, data + shaders[i]->BytecodeLength);
+      *shaders[i] = {bytecode[i].data(), bytecode[i].size()};
+    }
+    auto &layout = pDesc->InputLayout;
+    if (layout.pInputElementDescs) {
+      input_elements.assign(layout.pInputElementDescs, layout.pInputElementDescs + layout.NumElements);
+      semantic_names.resize(layout.NumElements);
+      for (unsigned i = 0; i < layout.NumElements; i++) {
+        if (layout.pInputElementDescs[i].SemanticName)
+          semantic_names[i] = layout.pInputElementDescs[i].SemanticName;
+        input_elements[i].SemanticName = semantic_names[i].c_str();
+      }
+      desc.InputLayout = {input_elements.data(), (UINT)input_elements.size()};
+    }
+    // Stream output isn't supported: the count stays, for the compile to refuse.
+    desc.StreamOutput.pSODeclaration = nullptr;
+    desc.StreamOutput.pBufferStrides = nullptr;
+    desc.CachedPSO = {};
+  }
+};
+
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
 protected:
+  GraphicsPipelineDesc desc_;
   MTL_SHADER_REFLECTION ref_vs;
   MTL_SHADER_REFLECTION ref_ps;
 
@@ -476,8 +553,21 @@ public:
     forced_sample_count = pDesc->RasterizerState.ForcedSampleCount;
   }
 
-  virtual HRESULT
+  HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
+    desc_.Copy(pDesc);
+    Queue(device_);
+    return S_OK;
+  }
+
+  HRESULT
+  Compile() final {
+    return Build(&desc_.desc);
+  }
+
+  /* Compiles the shaders and makes the Metal pipeline. */
+  virtual HRESULT
+  Build(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
     if (pDesc->StreamOutput.NumEntries) {
       ERR("CreatePipelineState: SO not supported");
       return E_NOTIMPL;
@@ -720,8 +810,8 @@ protected:
 public:
   MTLD3D12GeometryGraphicsPipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12GraphicsPipelineStateImpl(pDevice) {}
 
-  virtual HRESULT
-  Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
+  HRESULT
+  Build(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) override {
     if (pDesc->StreamOutput.NumEntries) {
       ERR("CreatePipelineState: SO not supported");
       return E_NOTIMPL;
@@ -964,8 +1054,8 @@ protected:
 public:
   MTLD3D12TessellationGraphicsPipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12GraphicsPipelineStateImpl(pDevice) {}
 
-  virtual HRESULT
-  Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
+  HRESULT
+  Build(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) override {
     if (pDesc->StreamOutput.NumEntries) {
       ERR("CreatePipelineState: SO not supported");
       return E_NOTIMPL;

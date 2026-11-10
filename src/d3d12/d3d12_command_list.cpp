@@ -243,7 +243,7 @@ public:
   ResetState(ID3D12PipelineState *pInitialPipelineState) {
     pso_graphics_ = nullptr;
     pso_compute_ = nullptr;
-    if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
+    if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState); pso && pso->Wait()) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
       else
@@ -870,8 +870,16 @@ public:
 
   void STDMETHODCALLTYPE
   Dispatch(UINT X, UINT Y, UINT Z) {
+    // No thread groups is no work in Direct3D 12; Metal refuses such a dispatch.
+    if (!X || !Y || !Z)
+      return;
     if (!PreDispatch())
       return;
+    // Persistent thread groups take their work from a queue in memory and wait for each other: as many as any Apple
+    // GPU keeps resident at once (D3DMetal's number), rather than Unreal's 1440, which can leave a group that took
+    // work unscheduled while the others wait for it. Fewer groups only take longer.
+    if (pso_compute_->persistent_threads && Y == 1 && Z == 1)
+      X = std::min(X, 128u);
 
     auto &cmd_dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
     cmd_dispatch.type = WMTComputeCommandDispatch;
@@ -908,6 +916,15 @@ public:
     cmd_cp.dst_offset = DstOffset;
     cmd_cp.copy_length = ByteCount;
   };
+
+  /* A block-compressed copy's region is whole blocks: a mip smaller than a block, or one whose size isn't a whole
+   * number of blocks, has its footprint and boxes rounded up past its edge (a 2x2 mip's footprint is 4x4). Metal takes
+   * the region only to the mip's edge there (its validation refuses more). */
+  static void
+  ClampBlockCopy(WMTSize &size, const D3D12_BOX &mip, uint64_t x, uint64_t y) {
+    size.width = std::min<uint64_t>(size.width, mip.right > x ? mip.right - x : 0);
+    size.height = std::min<uint64_t>(size.height, mip.bottom > y ? mip.bottom - y : 0);
+  }
 
   void STDMETHODCALLTYPE
   CopyTextureRegion(
@@ -980,6 +997,8 @@ public:
         cmd_cp.bytes_per_row = pSrc->PlacedFootprint.Footprint.RowPitch;
         cmd_cp.bytes_per_image = src_depth_pitch;
         cmd_cp.size = {src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front};
+        if (block_width > 1)
+          ClampBlockCopy(cmd_cp.size, GetResourceExtent(dst_desc, dst_level), DstX, DstY);
         cmd_cp.dst = dst->current()->texture();
         cmd_cp.level = dst_level;
         cmd_cp.slice = dst_slice;
@@ -1048,6 +1067,55 @@ public:
           return;
         }
 
+        // Direct3D 12 copies between a block-compressed format and the uncompressed one of the block's size (BC1 and
+        // BC4 with R32G32_UINT, the other BCs with R32G32B32A32_UINT) a texel to a block, as Unreal's runtime virtual
+        // textures do after compressing on the GPU. Metal copies only between textures of one format, and counts
+        // texels: these go through a buffer, where both lay their blocks out alike.
+        bool src_bc = src_format.Flag & MTL_DXGI_FORMAT_BC, dst_bc = dst_format.Flag & MTL_DXGI_FORMAT_BC;
+        if (src_bc != dst_bc) {
+          if (src_format.BytesPerTexel != dst_format.BytesPerTexel) {
+            WARN("CopyTextureRegion: can't copy between formats ", src_desc.Format, " and ", dst_desc.Format);
+            return;
+          }
+          uint32_t width = src_box.right - src_box.left, height = src_box.bottom - src_box.top;
+          uint32_t depth = src_box.back - src_box.front;
+          uint32_t blocks_x = src_bc ? (width + 3) / 4 : width, blocks_y = src_bc ? (height + 3) / 4 : height;
+          uint32_t bytes_per_row = align(blocks_x * src_format.BytesPerTexel, 256);
+          uint32_t bytes_per_image = bytes_per_row * blocks_y;
+          auto [temp_buffer, temp_buffer_offset] = allocator_->AllocateTempBuffer(bytes_per_image * depth, 256);
+
+          auto &cmd_to_tmp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
+          cmd_to_tmp.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
+          cmd_to_tmp.src = src->current()->texture();
+          cmd_to_tmp.level = src_level;
+          cmd_to_tmp.slice = src_slice;
+          cmd_to_tmp.origin = {src_box.left, src_box.top, src_box.front};
+          cmd_to_tmp.size = {width, height, depth};
+          if (src_bc)
+            ClampBlockCopy(cmd_to_tmp.size, GetResourceExtent(src_desc, src_level), src_box.left, src_box.top);
+          cmd_to_tmp.dst = temp_buffer;
+          cmd_to_tmp.offset = temp_buffer_offset;
+          cmd_to_tmp.bytes_per_row = bytes_per_row;
+          cmd_to_tmp.bytes_per_image = src->textureType() == WMTTextureType3D ? bytes_per_image : 0;
+          cmd_to_tmp.options = WMTBlitOptionNone;
+
+          auto &cmd_to_tex = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
+          cmd_to_tex.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
+          cmd_to_tex.src = temp_buffer;
+          cmd_to_tex.src_offset = temp_buffer_offset;
+          cmd_to_tex.bytes_per_row = bytes_per_row;
+          cmd_to_tex.bytes_per_image = dst->textureType() == WMTTextureType3D ? bytes_per_image : 0;
+          cmd_to_tex.size = {dst_bc ? blocks_x * 4 : blocks_x, dst_bc ? blocks_y * 4 : blocks_y, depth};
+          if (dst_bc)
+            ClampBlockCopy(cmd_to_tex.size, GetResourceExtent(dst_desc, dst_level), DstX, DstY);
+          cmd_to_tex.dst = dst->current()->texture();
+          cmd_to_tex.level = dst_level;
+          cmd_to_tex.slice = dst_slice;
+          cmd_to_tex.origin = {DstX, DstY, DstZ};
+          cmd_to_tex.options = WMTBlitOptionNone;
+          return;
+        }
+
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
         cmd_cp.type = WMTBlitCommandCopyFromTextureToTexture;
         cmd_cp.src = src->current()->texture();
@@ -1055,6 +1123,10 @@ public:
         cmd_cp.src_slice = src_slice;
         cmd_cp.src_origin = {src_box.left, src_box.top, src_box.front};
         cmd_cp.src_size = {src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front};
+        if (src_format.Flag & MTL_DXGI_FORMAT_BC) {
+          ClampBlockCopy(cmd_cp.src_size, GetResourceExtent(src_desc, src_level), src_box.left, src_box.top);
+          ClampBlockCopy(cmd_cp.src_size, GetResourceExtent(dst_desc, dst_level), DstX, DstY);
+        }
         cmd_cp.dst = dst->current()->texture();
         cmd_cp.dst_level = dst_level;
         cmd_cp.dst_slice = dst_slice;
@@ -1095,6 +1167,8 @@ public:
         cmd_cp.slice = src_slice;
         cmd_cp.origin = {src_box.left, src_box.top, src_box.front};
         cmd_cp.size = {src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front};
+        if (block_width > 1)
+          ClampBlockCopy(cmd_cp.size, GetResourceExtent(src_desc, src_level), src_box.left, src_box.top);
         cmd_cp.dst = dst->current()->buffer();
         cmd_cp.offset = pDst->PlacedFootprint.Offset + (DstX / block_width) * dst_format.BytesPerTexel +
                         (DstY / block_width) * pDst->PlacedFootprint.Footprint.RowPitch + DstZ * dst_depth_pitch;
@@ -1261,6 +1335,9 @@ public:
 
   void STDMETHODCALLTYPE
   SetPipelineState(ID3D12PipelineState *pPSO) {
+    // One that failed to compile draws nothing, as none bound does.
+    if (pPSO && !static_cast<MTLD3D12PipelineState *>(pPSO)->Wait())
+      pPSO = nullptr;
     if (!pPSO) {
       pso_graphics_ = nullptr;
       pso_compute_ = nullptr;

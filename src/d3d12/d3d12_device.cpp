@@ -26,6 +26,7 @@
 #include "log/log.hpp"
 #ifndef _WIN32
 #include "d3d12_shared_native.hpp"
+#include "dxmt_tasks.hpp"
 #include <TargetConditionals.h>
 #endif
 #include <map>
@@ -37,6 +38,30 @@ namespace dxmt {
 const GUID kD3D12DeviceDownlevelUUID = {0x74eaee3f, 0x2f4b, 0x476d, {0x82, 0xba, 0x2b, 0x85, 0xcb, 0x49, 0xe3, 0x10}};
 
 HRESULT PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc);
+
+template <> struct task_trait<MTLD3D12PipelineState *> {
+  MTLD3D12PipelineState *
+  run_task(MTLD3D12PipelineState *task) {
+    task->RunCompile();
+    return task;
+  }
+  bool
+  get_done(MTLD3D12PipelineState *task) {
+    return true;
+  }
+  void
+  set_done(MTLD3D12PipelineState *task) {}
+};
+
+/* Pipelines' compiles, on a third of the cores at most: the VM's own CPUs and the render threads run beside them. One
+ * scheduler for the process, never destroyed: a compile can drop the last reference to its pipeline, and so to its
+ * device, on one of these threads, where a device's own scheduler couldn't be destroyed. */
+static task_scheduler<MTLD3D12PipelineState *> &
+PipelineCompiles() {
+  static auto *scheduler =
+      new task_scheduler<MTLD3D12PipelineState *>(std::max(2u, dxmt::thread::hardware_concurrency() / 3));
+  return *scheduler;
+}
 
 class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
 
@@ -96,6 +121,11 @@ public:
   SM50_SHADER_METAL_VERSION
   GetShaderMetalVersion() override {
     return shader_metal_version_;
+  }
+
+  void
+  QueuePipelineCompile(MTLD3D12PipelineState *pPipelineState) override {
+    PipelineCompiles().submit(pPipelineState);
   }
 
   WMT::Device
@@ -390,13 +420,15 @@ public:
       if (DataSize != sizeof(D3D12_FEATURE_DATA_SHADER_MODEL))
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_SHADER_MODEL *>(pFeatureData);
-      // 6.2: what 6.1 and 6.2 add beyond 6.0 is optional (view instancing, barycentrics, native 16-bit ops, each
-      // answered as absent), and the DXIL frontend takes their shaders. Engines compile for 6.2 at least (Godot's
-      // Direct3D 12 renderer does), and Windows refuses a shader above the highest model. The highest that isn't
+      // 6.6: the DXIL frontend takes 6.6's resource handles from bindings, packed 8-bit math (6.4) and 64-bit atomic
+      // min and max on typed resources (see OPTIONS9 and OPTIONS11), which Unreal 5's Nanite needs; the rest of what
+      // 6.1 to 6.6 add is optional and answered as absent (view instancing, barycentrics, native 16-bit ops,
+      // raytracing, mesh shaders, sampler feedback). 6.5's WaveMatch and WaveMultiPrefix aren't translated yet: a
+      // shader with them fails its pipeline. Windows refuses a shader above the highest model. The highest that isn't
       // above the caller's, as Windows answers.
       if (out->HighestShaderModel < D3D_SHADER_MODEL_5_1)
         return E_INVALIDARG;
-      out->HighestShaderModel = std::min(D3D_SHADER_MODEL_6_2, out->HighestShaderModel);
+      out->HighestShaderModel = std::min(D3D_SHADER_MODEL_6_6, out->HighestShaderModel);
       return S_OK;
     }
     case D3D12_FEATURE_D3D12_OPTIONS: {
@@ -549,13 +581,19 @@ public:
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS9 *>(pFeatureData);
       *out = {};
       out->WaveMMATier = D3D12_WAVE_MMA_TIER_NOT_SUPPORTED;
+      // 64-bit atomics on typed UAVs: Metal has unsigned min and max of them (what Nanite's visibility buffer takes);
+      // other operations fail their pipeline. Not on groupshared memory.
+      out->AtomicInt64OnTypedResourceSupported = TRUE;
+      out->AtomicInt64OnGroupSharedSupported = FALSE;
       return S_OK;
     }
     case D3D12_FEATURE_D3D12_OPTIONS11: {
       if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS11))
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS11 *>(pFeatureData);
-      out->AtomicInt64OnDescriptorHeapResourceSupported = FALSE;
+      // The same atomics through descriptor tables (a resource on a descriptor heap): Windows' runtime checks this,
+      // not OPTIONS9, for such a pipeline under the newer DDIs.
+      out->AtomicInt64OnDescriptorHeapResourceSupported = TRUE;
       return S_OK;
     }
     case D3D12_FEATURE_COMMAND_QUEUE_PRIORITY: {

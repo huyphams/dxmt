@@ -5,7 +5,7 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-#define AIRCONV_VERSION 37
+#define AIRCONV_VERSION 41
 
 #ifdef __cplusplus
 #include <string>
@@ -129,7 +129,13 @@ struct MTL_SHADER_REFLECTION {
   uint32_t NumOutputElement;
   uint32_t ThreadsPerPatch;
   uint32_t ArgumentTableQwords;
+  uint32_t Flags; /* MTL_SHADER_FLAG_* */
 };
+
+/* A compute shader whose thread groups hand each other work through memory and wait for it: they all need to run at
+ * once, which Metal doesn't promise, so a dispatch of more of them than the GPU keeps resident can wait forever. Its
+ * dispatches are best kept small (see the Direct3D 12 command list's Dispatch). */
+#define MTL_SHADER_FLAG_PERSISTENT_THREADS 1
 
 #if defined(__LP64__) || defined(_WIN64)
 typedef void *sm50_ptr64_t;

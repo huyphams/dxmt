@@ -1254,6 +1254,10 @@ initialize(
       pRefl->ThreadgroupSize[0] = shader->threadgroup_size[0];
       pRefl->ThreadgroupSize[1] = shader->threadgroup_size[1];
       pRefl->ThreadgroupSize[2] = shader->threadgroup_size[2];
+      // Unreal's Nanite culls nodes and clusters in one dispatch of persistent thread groups (UE 5.0's
+      // PersistentClusterCull, its main and post pass variants), known by name as Apple's converter knows it.
+      if (auto *entry = shader->dxil->getFunction("PersistentClusterCull"); entry && !entry->isDeclaration())
+        pRefl->Flags |= MTL_SHADER_FLAG_PERSISTENT_THREADS;
       break;
     case microsoft::D3D10_SB_PIXEL_SHADER:
       pRefl->PixelShader.ValidRenderTargets = shader->pso_valid_output_reg_mask;

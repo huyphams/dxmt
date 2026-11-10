@@ -148,8 +148,10 @@ Buffer::prepareAllocationViews(BufferAllocation *allocation) {
     info.pixel_format = format;
     info.options = allocation->info_.options;
     auto usage = WMTTextureUsageShaderRead;
-    if (!allocation->flags().test(BufferAllocationFlag::GpuReadonly) &&
-       ( allocation->flags().test(BufferAllocationFlag::GpuManaged) ||  allocation->flags().test(BufferAllocationFlag::GpuPrivate))) {
+    if (allocation->flags().test(BufferAllocationFlag::ShaderWritable) ||
+        (!allocation->flags().test(BufferAllocationFlag::GpuReadonly) &&
+         (allocation->flags().test(BufferAllocationFlag::GpuManaged) ||
+          allocation->flags().test(BufferAllocationFlag::GpuPrivate)))) {
       usage |= WMTTextureUsageShaderWrite;
       if (format == WMTPixelFormatR32Uint || format == WMTPixelFormatR32Sint ||
           (format == WMTPixelFormatRG32Uint && device_.supportsFamily(WMTGPUFamilyApple8))) {

@@ -147,12 +147,37 @@ class MTLD3D12QueryHeap : public ID3D12QueryHeap {
 public:
 };
 
+class MTLD3D12Device;
+
 class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
 
+  /* A pipeline compiles on the device's task scheduler, off the thread that creates it, which also records and
+     submits the app's commands: Unreal Engine 5 creates thousands of pipelines at start, and compiled in turn there
+     they held its frames back for seconds. Wait() returns once it has compiled, compiling it on the calling thread if
+     no worker has started on it, and says whether it did. */
+  bool Wait();
+  /* The scheduler's task: compiles it unless a thread waiting for it has, then drops the reference Queue() took. */
+  void RunCompile();
+
+  virtual void AddRefPrivate() = 0;
+  virtual void ReleasePrivate() = 0;
+
   static HRESULT
   InitializeShader(D3D12_SHADER_BYTECODE Bytecode, sm50_shader_t *ppShader, struct MTL_SHADER_REFLECTION *pRefl);
+
+protected:
+  /* Compiles it from the description Initialize() kept, on whichever thread claimed it. */
+  virtual HRESULT Compile() = 0;
+  void Queue(MTLD3D12Device *pDevice);
+
+private:
+  enum : uint32_t { kQueued, kCompiling, kCompiled, kFailed };
+  std::atomic<uint32_t> compile_state_ = kQueued;
+
+  bool Claim();
+  void CompileClaimed();
 };
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
@@ -174,18 +199,14 @@ public:
 
   virtual WMT::RenderPipelineState
   GetRenderPipelineVariant(D3D12_PRIMITIVE_TOPOLOGY Topology) = 0;
-
-  virtual void AddRefPrivate() = 0;
-  virtual void ReleasePrivate() = 0;
 };
 
 class MTLD3D12ComputePipelineState : public MTLD3D12PipelineState {
 public:
   WMT::Reference<WMT::ComputePipelineState> pso;
   WMTSize threadgroup_size;
-
-  virtual void AddRefPrivate() = 0;
-  virtual void ReleasePrivate() = 0;
+  /* Its shader's thread groups wait for each other (MTL_SHADER_FLAG_PERSISTENT_THREADS). */
+  bool persistent_threads = false;
 };
 
 class MTLD3D12Device : public ID3D12Device4 {
@@ -194,6 +215,9 @@ public:
 
   /* The Metal version shaders are converted for. */
   virtual SM50_SHADER_METAL_VERSION GetShaderMetalVersion() = 0;
+
+  /* Queues a pipeline's compile on the device's task scheduler (see MTLD3D12PipelineState::Wait). */
+  virtual void QueuePipelineCompile(MTLD3D12PipelineState *pPipelineState) = 0;
 
   virtual D3D_FEATURE_LEVEL GetFeatureLevel() = 0;
 

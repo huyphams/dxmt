@@ -42,6 +42,8 @@ enum class BufferAllocationFlag : uint32_t {
   SuballocateFromOnePage = 5,
   CpuPlaced = 6,
   AllocatedOnHeap = 7,
+  /* shaders write it through typed views (a Direct3D 12 buffer that allows unordered access) */
+  ShaderWritable = 8,
 };
 
 struct BufferViewKey {
