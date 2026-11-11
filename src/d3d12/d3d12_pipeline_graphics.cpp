@@ -453,7 +453,10 @@ public:
     }
 
     info.raster_sample_count = pDesc->SampleDesc.Count;
-    info.support_indirect_command_buffers = true;
+    /* Plain pipelines only: Metal takes a mesh one (geometry shaders, tessellation) in an indirect command buffer
+       only from Apple GPU family 9 (M3), and its validation aborts on M1 and M2 ("Use of mesh shader pipelines in
+       indirect command buffers is not supported by this device"). ExecuteIndirect doesn't draw through those. */
+    info.support_indirect_command_buffers = std::is_same_v<RenderPipelineInfo, WMTRenderPipelineInfo>;
 
     info.alpha_to_coverage_enabled = pDesc->BlendState.AlphaToCoverageEnable && !ref_ps.PixelShader.HasCoverageOutput;
 
